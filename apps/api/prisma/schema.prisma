@@ -1,0 +1,203 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String    @id @default(cuid())
+  clerkId     String    @unique
+  email       String    @unique
+  displayName String?
+  avatarUrl   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  notebooks     Notebook[]
+  chatMessages  ChatMessage[]
+  notes         Note[]
+  jobs          GenerationJob[]
+}
+
+model Notebook {
+  id            String    @id @default(cuid())
+  ownerId       String
+  owner         User      @relation(fields: [ownerId], references: [id])
+  title         String
+  description   String?
+  coverAssetId  String?
+  visibility    String    @default("private")
+  settingsJson  Json      @default("{}")
+  deletedAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  sources       Source[]
+  members       NotebookMember[]
+  chatMessages  ChatMessage[]
+  notes         Note[]
+  jobs          GenerationJob[]
+  outputs       Output[]
+  collections   CollectionItem[]
+
+  @@index([ownerId, updatedAt])
+}
+
+model NotebookMember {
+  id          String    @id @default(cuid())
+  notebookId  String
+  notebook    Notebook  @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  userId      String
+  role        String
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime?
+
+  @@unique([notebookId, userId])
+}
+
+model Source {
+  id              String    @id @default(cuid())
+  notebookId      String
+  notebook        Notebook  @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  type            String
+  title           String
+  canonicalUrl    String?
+  domain          String?
+  author          String?
+  publishedAt     DateTime?
+  filePath        String?
+  extractedText   String?   @db.Text
+  status          String    @default("queued")
+  selected        Boolean   @default(true)
+  wordCount       Int?
+  processingError String?
+  deletedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  chunks        SourceChunk[]
+  citations     Citation[]
+
+  @@index([notebookId, status])
+  @@index([notebookId, selected])
+}
+
+model SourceChunk {
+  id          String    @id @default(cuid())
+  sourceId    String
+  source      Source    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  text        String    @db.Text
+  pageOffset  Int?
+  startOffset Int?
+  endOffset   Int?
+  embedding   String?
+}
+
+model ChatMessage {
+  id        String    @id @default(cuid())
+  notebookId String
+  notebook  Notebook  @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?     @relation(fields: [userId], references: [id])
+  role      String
+  content   String    @db.Text
+  modelMeta Json?
+  createdAt DateTime  @default(now())
+
+  citations Citation[]
+
+  @@index([notebookId, createdAt])
+}
+
+model Citation {
+  id        String      @id @default(cuid())
+  messageId String
+  message   ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  sourceId  String
+  source    Source      @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  quote     String?
+  startOffset Int?
+  page      Int?
+}
+
+model GenerationJob {
+  id          String    @id @default(cuid())
+  notebookId  String
+  notebook    Notebook  @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  requestedBy String
+  user        User      @relation(fields: [requestedBy], references: [id])
+  type        String
+  config      Json
+  status      String    @default("queued")
+  progress    Int       @default(0)
+  outputId    String?   @unique
+  error       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  output      Output?
+
+  @@index([notebookId, status])
+}
+
+model Output {
+  id          String        @id @default(cuid())
+  notebookId  String
+  notebook    Notebook      @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  jobId       String        @unique
+  job         GenerationJob @relation(fields: [jobId], references: [id])
+  type        String
+  title       String
+  content     Json
+  artifactUrl String?
+  savedState  Boolean       @default(false)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+model Note {
+  id          String    @id @default(cuid())
+  notebookId  String
+  notebook    Notebook  @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  authorId    String
+  author      User      @relation(fields: [authorId], references: [id])
+  body        String    @db.Text
+  sourceIds   String[]
+  outputId    String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([notebookId, createdAt])
+}
+
+model Collection {
+  id          String    @id @default(cuid())
+  ownerId     String
+  name        String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  items       CollectionItem[]
+}
+
+model CollectionItem {
+  collectionId  String
+  collection    Collection  @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  notebookId    String
+  notebook      Notebook    @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  position      Int
+
+  @@id([collectionId, notebookId])
+}
+
+model AuditEvent {
+  id        String    @id @default(cuid())
+  actor     String
+  action    String
+  resource  String
+  meta      Json?
+  createdAt DateTime  @default(now())
+}
