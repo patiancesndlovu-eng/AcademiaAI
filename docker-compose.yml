@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: academiaai-db
+    environment:
+      POSTGRES_USER: academiaai
+      POSTGRES_PASSWORD: academiaai_dev
+      POSTGRES_DB: academiaai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+volumes:
+  postgres_data:
