@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { UserButton } from "@clerk/clerk-react";
 import { MoreVertical, Grid2X2, Plus, Copy, BarChart3, Share2, Settings, HelpCircle, Zap, Globe2 } from "lucide-react";
 import { IconButton, PillButton, AcademiaMark, BellIcon, MARK_URL } from "@/components/common/Primitives";
 
@@ -55,7 +56,18 @@ export function TopBar({ mode, notebookTitle, onCreate, onToast }: TopBarProps) 
           )}
         </div>
         <IconButton label="App menu" onClick={() => onToast("App menu opened")}><Grid2X2 size={19} /></IconButton>
-        <button onClick={() => onToast("Profile menu opened")} className="ml-1 flex h-9 w-9 items-center justify-center rounded-full bg-[#0d6e5f] text-sm font-semibold text-[#d9f6eb] transition hover:ring-2 hover:ring-[#4b947f]">M</button>
+        <UserButton
+          afterSignOutUrl="/sign-in"
+          appearance={{
+            elements: {
+              avatarBox: "h-9 w-9 rounded-full ring-2 ring-[#3a3f49]",
+              userButtonPopoverCard: "bg-[#292c32] border border-[#3a3f49]",
+              userButtonPopoverActionButton: "text-[#d6d9df] hover:bg-[#373b44]",
+              userButtonPopoverActionButtonText: "text-[#d6d9df]",
+              userButtonPopoverFooter: "hidden",
+            },
+          }}
+        />
       </div>
     </header>
   );

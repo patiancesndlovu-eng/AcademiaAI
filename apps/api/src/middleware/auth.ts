@@ -3,33 +3,32 @@ import { getAuth, requireAuth } from '@clerk/express'
 import { clerkClient } from '@clerk/express'
 import { prisma } from '../config/db'
 
-declare global {
-  namespace Express {
-    interface Request {
-      user?: {
-        id: string
-        clerkId: string
-        email: string
-        displayName: string | null
-        avatarUrl: string | null
-      }
-    }
-  }
-}
-
 export { requireAuth }
 
 export async function syncUserToDb(req: Request, res: Response, next: NextFunction) {
   try {
     const auth = getAuth(req)
     if (!auth?.userId) {
-      return next()
+      // requireAuth should have already blocked this, but be safe
+      return res.status(401).json({
+        data: null,
+        meta: { requestId: req.requestId },
+        error: { code: 'UNAUTHORIZED', message: 'Authentication required', retryable: false },
+      })
     }
 
     const clerkUser = await clerkClient.users.getUser(auth.userId)
     const primaryEmail =
       clerkUser.emailAddresses.find((e) => e.id === clerkUser.primaryEmailAddressId)
         ?.emailAddress ?? clerkUser.emailAddresses[0]?.emailAddress ?? ''
+
+    if (!primaryEmail) {
+      return res.status(400).json({
+        data: null,
+        meta: { requestId: req.requestId },
+        error: { code: 'BAD_REQUEST', message: 'User has no email address', retryable: false },
+      })
+    }
 
     const user = await prisma.user.upsert({
       where: { clerkId: auth.userId },
@@ -58,6 +57,10 @@ export async function syncUserToDb(req: Request, res: Response, next: NextFuncti
     next()
   } catch (err) {
     console.error('User sync error:', err)
-    next()
+    return res.status(500).json({
+      data: null,
+      meta: { requestId: req.requestId },
+      error: { code: 'AUTH_SYNC_FAILED', message: 'Failed to sync user session', retryable: true },
+    })
   }
 }

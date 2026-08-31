@@ -9,7 +9,7 @@ export interface ApiResponse<T> {
 export function success<T>(data: T, requestId?: string): ApiResponse<T> {
   return {
     data,
-    meta: { requestId: requestId ?? randomUUID() },
+    meta: { requestId: requestId || randomUUID() },
     error: null,
   }
 }
@@ -22,7 +22,7 @@ export function error(
 ): ApiResponse<never> {
   return {
     data: null,
-    meta: { requestId: requestId ?? randomUUID() },
+    meta: { requestId: requestId || randomUUID() },
     error: { code, message, retryable },
   }
 }

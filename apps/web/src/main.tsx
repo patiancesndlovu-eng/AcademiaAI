@@ -6,26 +6,32 @@ import App from "./App";
 import "./index.css";
 
 const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 1000 * 60 * 5,
-      refetchOnWindowFocus: false,
-    },
-  },
+	defaultOptions: {
+		queries: {
+			staleTime: 1000 * 60 * 5,
+			refetchOnWindowFocus: false,
+		},
+	},
 });
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 if (!clerkPubKey) {
-  throw new Error("Missing VITE_CLERK_PUBLISHABLE_KEY");
+	throw new Error("Missing VITE_CLERK_PUBLISHABLE_KEY");
 }
 
 createRoot(document.getElementById("root")!).render(
-  <ClerkProvider publishableKey={clerkPubKey} afterSignOutUrl="/">
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <App />
-      </BrowserRouter>
-    </QueryClientProvider>
-  </ClerkProvider>
+	<ClerkProvider
+  publishableKey={clerkPubKey}
+  signInUrl="/sign-in"
+  signUpUrl="/sign-up"
+  signInFallbackRedirectUrl="/"
+  signUpFallbackRedirectUrl="/"
+>
+		<QueryClientProvider client={queryClient}>
+			<BrowserRouter>
+				<App />
+			</BrowserRouter>
+		</QueryClientProvider>
+	</ClerkProvider>
 );
