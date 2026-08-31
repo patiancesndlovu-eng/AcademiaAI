@@ -1,1 +1,16 @@
-{"name":"academia-ai","version":"1.0.0","private":true,"scripts":{"dev":"concurrently `\"pnpm --filter @academia-ai/api dev`\" `\"pnpm --filter @academia-ai/web dev`\"","build":"pnpm --filter @academia-ai/shared build && pnpm --filter @academia-ai/api build && pnpm --filter @academia-ai/web build","db:generate":"pnpm --filter @academia-ai/api db:generate","db:migrate":"pnpm --filter @academia-ai/api db:migrate","db:studio":"pnpm --filter @academia-ai/api db:studio"},"devDependencies":{"concurrently":"^8.2.2","typescript":"^5.4.0"}}
+{
+  "name": "academia-ai",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter @academia-ai/api dev\" \"pnpm --filter @academia-ai/web dev\"",
+    "build": "pnpm --filter @academia-ai/shared build && pnpm --filter @academia-ai/api build && pnpm --filter @academia-ai/web build",
+    "db:generate": "pnpm --filter @academia-ai/api db:generate",
+    "db:migrate": "pnpm --filter @academia-ai/api db:migrate",
+    "db:studio": "pnpm --filter @academia-ai/api db:studio"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.4.0"
+  }
+}

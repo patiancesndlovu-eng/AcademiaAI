@@ -1,5 +1,97 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-@layer base { :root { --background: 0 0% 100%; --foreground: 222.2 84% 4.9%; --card: 0 0% 100%; --card-foreground: 222.2 84% 4.9%; --popover: 0 0% 100%; --popover-foreground: 222.2 84% 4.9%; --primary: 222.2 47.4% 11.2%; --primary-foreground: 210 40% 98%; --secondary: 210 40% 96.1%; --secondary-foreground: 222.2 47.4% 11.2%; --muted: 210 40% 96.1%; --muted-foreground: 215.4 16.3% 46.9%; --accent: 210 40% 96.1%; --accent-foreground: 222.2 47.4% 11.2%; --destructive: 0 84.2% 60.2%; --destructive-foreground: 210 40% 98%; --border: 214.3 31.8% 91.4%; --input: 214.3 31.8% 91.4%; --ring: 222.2 84% 4.9%; --radius: 0.5rem; } }
-@layer base { * { @apply border-border; } body { @apply bg-background text-foreground; } }
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "DM Sans", sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+:root {
+  --radius: 0.75rem;
+  --background: oklch(0.141 0.007 286);
+  --foreground: oklch(0.93 0.006 90);
+  --card: oklch(0.18 0.008 286);
+  --card-foreground: oklch(0.93 0.006 90);
+  --popover: oklch(0.19 0.008 286);
+  --popover-foreground: oklch(0.93 0.006 90);
+  --primary: oklch(0.71 0.12 268);
+  --primary-foreground: oklch(0.18 0.03 270);
+  --secondary: oklch(0.22 0.008 286);
+  --secondary-foreground: oklch(0.88 0.006 90);
+  --muted: oklch(0.24 0.008 286);
+  --muted-foreground: oklch(0.63 0.012 275);
+  --accent: oklch(0.26 0.014 270);
+  --accent-foreground: oklch(0.94 0.006 90);
+  --destructive: oklch(0.64 0.18 25);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.72 0.12 268);
+}
+
+* { box-sizing: border-box; }
+
+html { background: #202226; }
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #202226;
+  color: #eef0f4;
+  font-family: "DM Sans", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, textarea, select { font: inherit; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #7ea7ff; outline-offset: 2px; }
+
+@layer base {
+  * { @apply border-border outline-ring/50; }
+  button:not(:disabled), [role="button"]:not([aria-disabled="true"]), [type="button"]:not(:disabled), [type="submit"]:not(:disabled), a[href], select:not(:disabled) { @apply cursor-pointer; }
+}
+
+.font-display { font-family: "Space Grotesk", sans-serif; }
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes pop-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes toast-in { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.animate-fade-in { animation: fade-in 180ms cubic-bezier(.23,1,.32,1); }
+.animate-modal-in { animation: modal-in 220ms cubic-bezier(.23,1,.32,1); }
+.animate-pop-in { animation: pop-in 160ms cubic-bezier(.23,1,.32,1); transform-origin: top right; }
+.animate-toast-in { animation: toast-in 220ms cubic-bezier(.23,1,.32,1); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
+
+@media (max-width: 1023px) {
+  html, body, #root { min-height: 100%; }
+}
