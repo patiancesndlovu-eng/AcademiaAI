@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { requireAuth, syncUserToDb } from '../middleware/auth'
+import { requireApiAuth, syncUserToDb } from '../middleware/auth'
 import { validateBody, validateParams, validateQuery } from '../middleware/validateRequest'
 import { success, error } from '../utils/response'
 import * as sourceService from '../services/sources'
@@ -52,7 +52,7 @@ const updateSourceSchema = z.object({
 // GET /api/v1/notebooks/:id/sources
 router.get(
   '/notebooks/:id/sources',
-  requireAuth,
+  requireApiAuth,
   syncUserToDb,
   validateParams(notebookIdSchema),
   validateQuery(listSourcesQuerySchema),
@@ -76,7 +76,7 @@ router.get(
 // POST /api/v1/notebooks/:id/sources/url
 router.post(
   '/notebooks/:id/sources/url',
-  requireAuth,
+  requireApiAuth,
   syncUserToDb,
   validateParams(notebookIdSchema),
   validateBody(addUrlSchema),
@@ -100,7 +100,7 @@ router.post(
 // POST /api/v1/notebooks/:id/sources/text
 router.post(
   '/notebooks/:id/sources/text',
-  requireAuth,
+  requireApiAuth,
   syncUserToDb,
   validateParams(notebookIdSchema),
   validateBody(addTextSchema),
@@ -124,7 +124,7 @@ router.post(
 // POST /api/v1/notebooks/:id/sources/upload-intent
 router.post(
   '/notebooks/:id/sources/upload-intent',
-  requireAuth,
+  requireApiAuth,
   syncUserToDb,
   validateParams(notebookIdSchema),
   validateBody(uploadIntentSchema),
@@ -148,7 +148,7 @@ router.post(
 // POST /api/v1/notebooks/:id/sources/upload-complete
 router.post(
   '/notebooks/:id/sources/upload-complete',
-  requireAuth,
+  requireApiAuth,
   syncUserToDb,
   validateParams(notebookIdSchema),
   validateBody(uploadCompleteSchema),
@@ -172,7 +172,7 @@ router.post(
 // POST /api/v1/notebooks/:id/sources/select
 router.post(
   '/notebooks/:id/sources/select',
-  requireAuth,
+  requireApiAuth,
   syncUserToDb,
   validateParams(notebookIdSchema),
   validateBody(batchSelectSchema),
@@ -196,7 +196,7 @@ router.post(
 // GET /api/v1/sources/:sourceId
 router.get(
   '/sources/:sourceId',
-  requireAuth,
+  requireApiAuth,
   syncUserToDb,
   validateParams(sourceIdSchema),
   async (req, res, next) => {
@@ -218,7 +218,7 @@ router.get(
 // PATCH /api/v1/sources/:sourceId
 router.patch(
   '/sources/:sourceId',
-  requireAuth,
+  requireApiAuth,
   syncUserToDb,
   validateParams(sourceIdSchema),
   validateBody(updateSourceSchema),
@@ -241,7 +241,7 @@ router.patch(
 // DELETE /api/v1/sources/:sourceId
 router.delete(
   '/sources/:sourceId',
-  requireAuth,
+  requireApiAuth,
   syncUserToDb,
   validateParams(sourceIdSchema),
   async (req, res, next) => {
@@ -263,7 +263,7 @@ router.delete(
 // POST /api/v1/sources/:sourceId/retry
 router.post(
   '/sources/:sourceId/retry',
-  requireAuth,
+  requireApiAuth,
   syncUserToDb,
   validateParams(sourceIdSchema),
   async (req, res, next) => {

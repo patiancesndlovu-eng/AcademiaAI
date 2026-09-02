@@ -4,7 +4,7 @@ import helmet from 'helmet'
 import morgan from 'morgan'
 import dotenv from 'dotenv'
 import { clerkMiddleware } from '@clerk/express'
-import rateLimit from 'express-rate-limit'
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit'
 import { env } from './config/env'
 import { prisma } from './config/db'
 import { requestIdMiddleware } from './middleware/requestId'
@@ -13,6 +13,7 @@ import meRoutes from './routes/me'
 import authRoutes from './routes/auth'
 import notebookRoutes from './routes/notebooks'
 import sourceRoutes from './routes/sources'
+import uploadRouter from './routes/upload'
 
 dotenv.config()
 
@@ -32,7 +33,7 @@ const apiLimiter = rateLimit({
   max: 1000,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.user?.id || req.ip || 'anonymous',
+  keyGenerator: (req) => ipKeyGenerator(req.ip ?? 'unknown'),
   handler: (_req, res) => {
     res.status(429).json({
       data: null,
@@ -63,6 +64,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/v1/auth', authLimiter, authRoutes)
 app.use('/api/v1/me', apiLimiter, meRoutes)
 app.use('/api/v1/notebooks', apiLimiter, notebookRoutes)
+app.use('/api/v1/internal/upload', uploadRouter)
 app.use('/api/v1', apiLimiter, sourceRoutes) // mounts /notebooks/:id/sources and /sources/*
 
 // 404

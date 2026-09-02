@@ -1,7 +1,6 @@
 import axios from 'axios'
-import { env } from '../config/env' // or however you access env vars in Vite
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api/v1'
+export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api/v1'
 
 export const api = axios.create({
   baseURL: API_BASE,
@@ -11,11 +10,21 @@ export const api = axios.create({
   timeout: 30000,
 })
 
+export async function getClerkToken(): Promise<string | null> {
+  try {
+    const clerk = (window as any).Clerk || (window as any).__clerk
+    if (clerk?.session?.getToken) {
+      return await clerk.session.getToken()
+    }
+  } catch {
+    // ignore
+  }
+  return null
+}
+
 // Request interceptor: inject Clerk token
 api.interceptors.request.use(async (config) => {
-  // Access Clerk session token from window or a global store
-  // If using @clerk/clerk-react, import from your auth hook/store
-  const token = await window.__clerk?.session?.getToken?.()
+  const token = await getClerkToken()
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -25,7 +34,6 @@ api.interceptors.request.use(async (config) => {
 // Response interceptor: normalize envelope
 api.interceptors.response.use(
   (response) => {
-    // If backend wraps in { data, meta, error }, unwrap it
     if (response.data && 'data' in response.data && 'meta' in response.data) {
       if (response.data.error) {
         return Promise.reject(response.data.error)
@@ -66,6 +74,20 @@ export async function getNotebook(id: string) {
   return data
 }
 
+export async function updateNotebook(id: string, body: { title?: string; description?: string; visibility?: string }) {
+  const { data } = await api.patch(`/notebooks/${id}`, body)
+  return data
+}
+
+export async function deleteNotebook(id: string) {
+  await api.delete(`/notebooks/${id}`)
+}
+
+export async function duplicateNotebook(id: string) {
+  const { data } = await api.post(`/notebooks/${id}/copy`)
+  return data
+}
+
 export async function getSources(notebookId: string, params?: { status?: string; search?: string; page?: number; pageSize?: number }) {
   const { data } = await api.get(`/notebooks/${notebookId}/sources`, { params })
   return data
@@ -88,5 +110,19 @@ export async function createUploadIntent(notebookId: string, body: { filename: s
 
 export async function completeUpload(notebookId: string, body: { filePath: string; originalName: string }) {
   const { data } = await api.post(`/notebooks/${notebookId}/sources/upload-complete`, body)
+  return data
+}
+
+export async function batchSelectSources(notebookId: string, body: { sourceIds: string[]; selected: boolean }) {
+  const { data } = await api.post(`/notebooks/${notebookId}/sources/select`, body)
+  return data
+}
+
+export async function deleteSource(sourceId: string) {
+  await api.delete(`/sources/${sourceId}`)
+}
+
+export async function getMe() {
+  const { data } = await api.get('/me')
   return data
 }

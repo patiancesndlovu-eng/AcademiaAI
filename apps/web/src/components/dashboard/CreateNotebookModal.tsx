@@ -1,14 +1,29 @@
 import { useState } from "react";
-import { Plus, BookMarked } from "lucide-react";
+import { Plus, BookMarked, Loader2 } from "lucide-react";
 import { ModalShell } from "@/components/workspace/ModalShell";
+import { createNotebook } from "@/lib/api";
 
 interface CreateNotebookModalProps {
   onClose: () => void;
-  onCreate: (title: string) => void;
+  onCreate: (notebook: any) => void;
 }
 
 export function CreateNotebookModal({ onClose, onCreate }: CreateNotebookModalProps) {
   const [title, setTitle] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleCreate = async () => {
+    if (!title.trim() || loading) return;
+    setLoading(true);
+    try {
+      const notebook = await createNotebook({ title: title.trim(), visibility: 'private' });
+      onCreate(notebook);
+    } catch (e: any) {
+      onCreate(null);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <ModalShell title="Create notebook" onClose={onClose} size="wide">
@@ -25,18 +40,20 @@ export function CreateNotebookModal({ onClose, onCreate }: CreateNotebookModalPr
           autoFocus
           value={title}
           onChange={(event) => setTitle(event.target.value)}
-          onKeyDown={(event) => { if (event.key === "Enter" && title.trim()) onCreate(title.trim()); }}
+          onKeyDown={(event) => { if (event.key === "Enter" && title.trim()) handleCreate(); }}
           placeholder="e.g. Designing a stronger literature review"
-          className="mt-2 w-full rounded-xl border border-[#4b515c] bg-[#15171a] px-4 py-3 text-sm text-[#eef0f4] outline-none transition placeholder:text-[#7e8794] focus:border-[#7d97e9] focus:ring-1 focus:ring-[#6077b5]"
+          /* FIX: single focus ring — outline-none + ring only, no duplicate border+ring combo */
+          className="mt-2 w-full rounded-xl border border-[#4b515c] bg-[#15171a] px-4 py-3 text-sm text-[#eef0f4] outline-none transition placeholder:text-[#7e8794] focus:border-[#6b8eef] focus:ring-2 focus:ring-[#5f75b1]/40"
         />
         <div className="mt-7 flex items-center justify-end gap-3">
           <button onClick={onClose} className="rounded-full px-4 py-2.5 text-[13px] font-medium text-[#b4bbc7] transition hover:bg-[#2c3037] hover:text-white">Cancel</button>
           <button
-            disabled={!title.trim()}
-            onClick={() => onCreate(title.trim())}
+            disabled={!title.trim() || loading}
+            onClick={handleCreate}
             className="inline-flex items-center gap-2 rounded-full bg-[#6f8ff0] px-5 py-2.5 text-[13px] font-semibold text-[#141b2d] transition hover:bg-[#92abff] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <Plus size={15} /> Create notebook
+            {loading ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}
+            Create notebook
           </button>
         </div>
       </div>
