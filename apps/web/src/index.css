@@ -70,7 +70,11 @@ body {
 }
 
 button, input, textarea, select { font: inherit; }
-button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #7ea7ff; outline-offset: 2px; }
+
+/* FIX: Removed the global input:focus-visible / textarea:focus-visible rule.
+   It had higher CSS specificity (0,1,1) than Tailwind utility classes,
+   causing a browser outline to appear ON TOP of the component's focus ring.
+   Components now fully own their own focus-visible styles. */
 
 @layer base {
   * { @apply border-border outline-ring/50; }

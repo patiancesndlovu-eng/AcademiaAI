@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, ChevronDown, Sparkles } from "lucide-react";
+import { Check, ChevronDown, Sparkles, Loader2 } from "lucide-react";
 import { ModalShell } from "./ModalShell";
 
 function Segment({ label, options, value, onChange }: { label: string; options: string[]; value: string; onChange: (value: string) => void }) {
@@ -26,6 +26,18 @@ export function QuizModal({ onClose, onToast }: QuizModalProps) {
   const [count, setCount] = useState("Standard");
   const [difficulty, setDifficulty] = useState("Medium");
   const [topic, setTopic] = useState("");
+  const [generating, setGenerating] = useState(false);
+
+  const handleGenerate = async () => {
+    if (generating) return;
+    setGenerating(true);
+    /* Simulate API call — replace with real quiz generation */
+    setTimeout(() => {
+      setGenerating(false);
+      onToast("Quiz generated successfully");
+      onClose();
+    }, 1500);
+  };
 
   return (
     <ModalShell title="Quiz" onClose={onClose}>
@@ -46,18 +58,20 @@ export function QuizModal({ onClose, onToast }: QuizModalProps) {
           onChange={(event) => setTopic(event.target.value)}
           rows={5}
           placeholder="Add 5 multiple-choice questions testing the core methods and arguments in these sources."
-          className="w-full resize-none rounded-xl border border-[#4c515c] bg-[#15171a] px-4 py-3 text-[14px] leading-6 text-[#eef0f4] outline-none transition placeholder:text-[#7f8794] focus:border-[#7995e9] focus:ring-1 focus:ring-[#5f75b1]"
+          /* FIX: single focus ring */
+          className="w-full resize-none rounded-xl border border-[#4c515c] bg-[#15171a] px-4 py-3 text-[14px] leading-6 text-[#eef0f4] outline-none transition placeholder:text-[#7f8794] focus:border-[#6b8eef] focus:ring-2 focus:ring-[#5f75b1]/40"
         />
         <div className="mt-3 flex flex-wrap gap-2">
-          <button onClick={() => setTopic("Key concepts and definitions") } className="rounded-full border border-[#58606e] px-3 py-2 text-xs text-[#d9dde4] transition hover:bg-[#2b3039]">+ Key concepts</button>
-          <button onClick={() => setTopic("Compare the methods used by each author") } className="rounded-full border border-[#58606e] px-3 py-2 text-xs text-[#d9dde4] transition hover:bg-[#2b3039]">+ Compare methods</button>
-          <button onClick={() => setTopic("Evidence and limitations") } className="rounded-full border border-[#58606e] px-3 py-2 text-xs text-[#d9dde4] transition hover:bg-[#2b3039]">+ Evidence & limits</button>
+          <button onClick={() => setTopic("Key concepts and definitions")} className="rounded-full border border-[#58606e] px-3 py-2 text-xs text-[#d9dde4] transition hover:bg-[#2b3039]">+ Key concepts</button>
+          <button onClick={() => setTopic("Compare the methods used by each author")} className="rounded-full border border-[#58606e] px-3 py-2 text-xs text-[#d9dde4] transition hover:bg-[#2b3039]">+ Compare methods</button>
+          <button onClick={() => setTopic("Evidence and limitations")} className="rounded-full border border-[#58606e] px-3 py-2 text-xs text-[#d9dde4] transition hover:bg-[#2b3039]">+ Evidence & limits</button>
         </div>
       </div>
       <div className="mt-8 flex items-center justify-end gap-3 border-t border-[#30343b] pt-5">
         <button onClick={onClose} className="rounded-full px-4 py-2.5 text-[13px] font-medium text-[#b4bbc7] transition hover:bg-[#2c3037] hover:text-white">Cancel</button>
-        <button onClick={() => { onClose(); onToast("Quiz generation started"); }} className="inline-flex items-center gap-2 rounded-full bg-[#6f8ff0] px-5 py-2.5 text-[13px] font-semibold text-[#141b2d] transition hover:bg-[#92abff] active:scale-[0.98]">
-          <Sparkles size={15} /> Generate
+        <button onClick={handleGenerate} disabled={generating} className="inline-flex items-center gap-2 rounded-full bg-[#6f8ff0] px-5 py-2.5 text-[13px] font-semibold text-[#141b2d] transition hover:bg-[#92abff] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40">
+          {generating ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+          {generating ? "Generating…" : "Generate"}
         </button>
       </div>
     </ModalShell>
