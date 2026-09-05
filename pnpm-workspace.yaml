@@ -1,6 +1,7 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+
 allowBuilds:
   '@clerk/shared': true
   '@prisma/client': true
@@ -9,3 +10,6 @@ allowBuilds:
   prisma: true
   sharp: true
   tesseract.js: true
+
+overrides:
+  undici: "6.21.0"
