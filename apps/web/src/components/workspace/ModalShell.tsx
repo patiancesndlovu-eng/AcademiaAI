@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { X, Sparkles } from "lucide-react";
 
 interface ModalShellProps {
@@ -9,6 +9,14 @@ interface ModalShellProps {
 }
 
 export function ModalShell({ title, onClose, children, size = "standard" }: ModalShellProps) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0d0f12]/75 p-4 backdrop-blur-[3px] animate-fade-in" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div className={`max-h-[90vh] w-full overflow-y-auto rounded-[20px] border border-[#3e434e] bg-[#202327] shadow-[0_28px_90px_rgba(0,0,0,.55)] animate-modal-in ${size === "wide" ? "max-w-[820px]" : "max-w-[900px]"}`}>

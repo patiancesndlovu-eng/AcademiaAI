@@ -200,17 +200,23 @@ All endpoints are prefixed with `/api/v1` and return a consistent envelope:
 }
 ```
 
-### Core Endpoints
+### Core Endpoints (implemented)
+
+All business routes live under `/api/v1` and use the envelope `{data, meta: {requestId}, error}`. Health: `GET /health`, `GET /health/live`, `GET /health/ready` (Postgres + Redis).
 
 | Domain | Endpoints |
 |--------|-----------|
 | **Auth** | `GET /me`, `PATCH /me`, `POST /auth/logout` |
-| **Notebooks** | `GET /notebooks`, `POST /notebooks`, `GET /notebooks/:id`, `PATCH /notebooks/:id`, `DELETE /notebooks/:id` |
-| **Sources** | `GET /notebooks/:id/sources`, `POST /sources/url`, `POST /sources/text`, `POST /sources/upload-intent`, `POST /sources/upload-complete`, `PATCH /sources/:id` |
-| **Chat** | `GET /notebooks/:id/chat/messages`, `POST /notebooks/:id/chat/messages` (SSE stream), `POST /chat/messages/:id/feedback` |
-| **Studio** | `GET /notebooks/:id/outputs`, `POST /notebooks/:id/generations`, `GET /generations/:id`, `GET /outputs/:id` |
-| **Notes** | `GET /notebooks/:id/notes`, `POST /notebooks/:id/notes`, `PATCH /notes/:id`, `DELETE /notes/:id` |
-| **Sharing** | `GET /notebooks/:id/shares`, `POST /notebooks/:id/shares`, `PATCH /shares/:id`, `DELETE /shares/:id` |
+| **Notebooks** | `GET /notebooks`, `POST /notebooks`, `GET /notebooks/:id`, `PATCH /notebooks/:id`, `DELETE /notebooks/:id`, `POST /notebooks/:id/copy`, `GET /notebooks/:id/membership` |
+| **Sources** | `GET /notebooks/:id/sources`, `POST /notebooks/:id/sources/url`, `POST /notebooks/:id/sources/text`, `POST /notebooks/:id/sources/upload-intent`, `POST /notebooks/:id/sources/upload-complete`, `POST /notebooks/:id/sources/select`, `GET /sources/:id`, `PATCH /sources/:id`, `DELETE /sources/:id`, `POST /sources/:id/retry` |
+| **Upload** | `POST /api/v1/internal/upload?path=…` — one-time upload-intent tokens, magic-byte validated |
+| **Chat** | `GET /notebooks/:id/chat/messages` (cursor pagination), `POST /notebooks/:id/chat/messages` — **SSE stream**: `message.started` → `message.delta` … → `citation` → `message.completed` |
+
+Role model: **owner > editor > viewer**. Editors and owners can ingest sources and chat; owners additionally manage notebook lifecycle and visibility. Public notebooks are read-only for non-members.
+
+### Phase 4 backlog (not yet implemented)
+
+Studio generation jobs (`POST /notebooks/:id/generations` → quiz/flashcards/summary), notes, sharing/members invites, web-enhanced search (`SERP_API_KEY`), S3/MinIO object storage, pgvector hybrid retrieval.
 
 ---
 
@@ -218,13 +224,14 @@ All endpoints are prefixed with `/api/v1` and return a consistent envelope:
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start both frontend and backend concurrently |
-| `npm run build` | Build shared package, then API, then web |
-| `npm run db:generate` | Generate Prisma Client from schema |
-| `npm run db:migrate` | Run database migrations |
-| `npm run db:studio` | Open Prisma Studio (database GUI) |
-| `npm run lint` | Run ESLint across the monorepo |
-| `npm run typecheck` | Run TypeScript checks without emitting |
+| `pnpm dev` | Start API + worker + web concurrently |
+| `pnpm dev:worker` | Run the BullMQ worker process alone (ingestion/cleanup) |
+| `pnpm build` | Build shared package, then API, then web |
+| `pnpm test` | API unit tests (vitest) |
+| `pnpm typecheck` | TypeScript checks without emitting |
+| `pnpm db:migrate` | Run Prisma migrations |
+
+Infrastructure: `docker compose up -d` starts PostgreSQL (5432) and Redis (6379→**6390** on the host; set `REDIS_URL=redis://localhost:6390`).
 
 ---
 

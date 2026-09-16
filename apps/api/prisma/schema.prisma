@@ -7,79 +7,140 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ─── Enums ───
+
+enum NotebookVisibility {
+  private
+  shared
+  public
+}
+
+enum NotebookRole {
+  owner
+  editor
+  viewer
+}
+
+enum SourceType {
+  upload
+  url
+  text
+  drive
+}
+
+enum SourceStatus {
+  queued
+  processing
+  ready
+  failed
+}
+
+enum GenerationType {
+  quiz
+  flashcards
+  summary
+  report
+  mindmap
+}
+
+enum GenerationStatus {
+  queued
+  processing
+  completed
+  failed
+  cancelled
+}
+
+enum MessageRole {
+  user
+  assistant
+  system
+}
+
+// ─── Models ───
+
 model User {
-  id           String          @id @default(cuid())
-  clerkId      String          @unique
-  email        String          @unique
+  id           String           @id @default(cuid())
+  clerkId      String           @unique
+  email        String           @unique
   displayName  String?
   avatarUrl    String?
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
   chatMessages ChatMessage[]
   jobs         GenerationJob[]
   notes        Note[]
   notebooks    Notebook[]
+  memberships  NotebookMember[]
 }
 
 model Notebook {
-  id           String           @id @default(cuid())
+  id           String             @id @default(cuid())
   ownerId      String
   title        String
   description  String?
   coverAssetId String?
-  visibility   String           @default("private")
-  settingsJson Json             @default("{}")
+  visibility   NotebookVisibility @default(private)
+  settingsJson Json               @default("{}")
   deletedAt    DateTime?
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
   chatMessages ChatMessage[]
   collections  CollectionItem[]
   jobs         GenerationJob[]
   notes        Note[]
-  owner        User             @relation(fields: [ownerId], references: [id])
+  owner        User               @relation(fields: [ownerId], references: [id])
   members      NotebookMember[]
   outputs      Output[]
   sources      Source[]
 
   @@index([ownerId, updatedAt])
+  @@index([deletedAt])
 }
 
 model NotebookMember {
-  id         String    @id @default(cuid())
+  id         String        @id @default(cuid())
   notebookId String
   userId     String
-  role       String
-  createdAt  DateTime  @default(now())
+  role       NotebookRole
+  createdAt  DateTime      @default(now())
   expiresAt  DateTime?
-  notebook   Notebook  @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  notebook   Notebook      @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([notebookId, userId])
+  @@index([notebookId])
+  @@index([userId])
 }
 
 model Source {
-  id              String        @id @default(cuid())
-  notebookId      String
-  type            String
-  title           String
-  canonicalUrl    String?
-  domain          String?
-  author          String?
-  publishedAt     DateTime?
-  filePath        String?
-  extractedText   String?
-  status          String        @default("queued")
-  selected        Boolean       @default(true)
-  wordCount       Int?
-  processingError String?
-  deletedAt       DateTime?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  citations       Citation[]
-  notebook        Notebook      @relation(fields: [notebookId], references: [id], onDelete: Cascade)
-  chunks          SourceChunk[]
+  id                 String       @id @default(cuid())
+  notebookId         String
+  type               SourceType
+  title              String
+  canonicalUrl       String?
+  domain             String?
+  author             String?
+  publishedAt        DateTime?
+  filePath           String?
+  extractedText      String?
+  status             SourceStatus @default(queued)
+  selected           Boolean      @default(true)
+  wordCount          Int?
+  progress           Int          @default(0)
+  processingAttempts Int          @default(0)
+  processingError    String?
+  deletedAt          DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  citations          Citation[]
+  notebook           Notebook     @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  chunks             SourceChunk[]
 
   @@index([notebookId, selected])
   @@index([notebookId, status])
+  @@index([notebookId, deletedAt])
+  @@index([deletedAt])
 }
 
 model SourceChunk {
@@ -91,18 +152,20 @@ model SourceChunk {
   endOffset   Int?
   embedding   String?
   source      Source  @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([sourceId])
 }
 
 model ChatMessage {
-  id         String     @id @default(cuid())
+  id         String      @id @default(cuid())
   notebookId String
   userId     String?
-  role       String
+  role       MessageRole
   content    String
   modelMeta  Json?
-  createdAt  DateTime   @default(now())
-  notebook   Notebook   @relation(fields: [notebookId], references: [id], onDelete: Cascade)
-  user       User?      @relation(fields: [userId], references: [id])
+  createdAt  DateTime    @default(now())
+  notebook   Notebook    @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  user       User?       @relation(fields: [userId], references: [id])
   citations  Citation[]
 
   @@index([notebookId, createdAt])
@@ -117,40 +180,47 @@ model Citation {
   page        Int?
   message     ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
   source      Source      @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([sourceId])
 }
 
 model GenerationJob {
-  id          String   @id @default(cuid())
+  id          String           @id @default(cuid())
   notebookId  String
   requestedBy String
-  type        String
+  type        GenerationType
   config      Json
-  status      String   @default("queued")
-  progress    Int      @default(0)
-  outputId    String?  @unique
+  status      GenerationStatus @default(queued)
+  progress    Int              @default(0)
+  outputId    String?          @unique
   error       String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  notebook    Notebook @relation(fields: [notebookId], references: [id], onDelete: Cascade)
-  user        User     @relation(fields: [requestedBy], references: [id])
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  notebook    Notebook         @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  user        User             @relation(fields: [requestedBy], references: [id])
   output      Output?
 
   @@index([notebookId, status])
+  @@index([requestedBy])
+  @@index([status])
 }
 
 model Output {
-  id          String        @id @default(cuid())
+  id          String          @id @default(cuid())
   notebookId  String
-  jobId       String        @unique
-  type        String
+  jobId       String          @unique
+  type        GenerationType
   title       String
   content     Json
   artifactUrl String?
-  savedState  Boolean       @default(false)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-  job         GenerationJob @relation(fields: [jobId], references: [id])
-  notebook    Notebook      @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+  savedState  Boolean         @default(false)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  job         GenerationJob   @relation(fields: [jobId], references: [id])
+  notebook    Notebook        @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+
+  @@index([notebookId])
 }
 
 model Note {
@@ -166,6 +236,7 @@ model Note {
   notebook   Notebook @relation(fields: [notebookId], references: [id], onDelete: Cascade)
 
   @@index([notebookId, createdAt])
+  @@index([authorId])
 }
 
 model Collection {
@@ -194,4 +265,6 @@ model AuditEvent {
   resource  String
   meta      Json?
   createdAt DateTime @default(now())
+
+  @@index([action, createdAt])
 }

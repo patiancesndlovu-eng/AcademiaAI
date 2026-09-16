@@ -1,68 +1,89 @@
+import { SourceStatus, SourceType, Prisma } from '@prisma/client'
 import { prisma } from '../config/db'
 import { env } from '../config/env'
 import * as storage from './storage'
-import * as ocr from './ocr'
-import { extractDomain } from '../utils/url'
+import * as uploadIntent from './uploadIntent'
+import { enqueueIngestion } from '../queues/queues'
+import { invalidateSourceListCache, invalidateRetrievalCache } from '../cache/invalidation'
+import { cacheKeys, cacheTtls } from '../cache/keys'
+import { getOrSet } from '../cache/cache'
+import { normalizeText, countWords } from '../utils/text'
+import { chunkText } from '../utils/chunker'
+import { serviceUnavailable } from '../utils/errors'
+
+/**
+ * Source service. Heavy processing (URL fetch, PDF/OCR, chunking of uploads)
+ * happens in the ingestion worker — never inside an HTTP request (spec Rule 4).
+ * Text sources are small and fully available at creation time, so they are
+ * normalized and chunked synchronously.
+ */
 
 const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 100
 
-export async function listSources(
-  notebookId: string,
-  options: {
-    status?: string
-    search?: string
-    page?: number
-    pageSize?: number
-  }
-) {
+export interface ListSourcesOptions {
+  status?: string
+  search?: string
+  page?: number
+  pageSize?: number
+}
+
+export async function listSources(notebookId: string, options: ListSourcesOptions) {
   const page = Math.max(1, options.page || 1)
   const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, options.pageSize || DEFAULT_PAGE_SIZE))
   const skip = (page - 1) * pageSize
 
-  const where: any = {
-    notebookId,
-    deletedAt: null,
-  }
+  const where: Prisma.SourceWhereInput = { notebookId, deletedAt: null }
 
   if (options.status) {
-    where.status = options.status
+    where.status = options.status as SourceStatus
   }
 
-  if (options.search && options.search.trim().length > 0) {
-    const trimmed = options.search.trim().slice(0, 100)
+  const trimmedSearch = options.search?.trim().slice(0, 100)
+  if (trimmedSearch) {
     where.OR = [
-      { title: { contains: trimmed, mode: 'insensitive' } },
-      { domain: { contains: trimmed, mode: 'insensitive' } },
+      { title: { contains: trimmedSearch, mode: 'insensitive' } },
+      { domain: { contains: trimmedSearch, mode: 'insensitive' } },
     ]
   }
 
-  const [data, total] = await Promise.all([
-    prisma.source.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-      skip,
-      take: pageSize,
-      select: {
-        id: true,
-        type: true,
-        title: true,
-        domain: true,
-        status: true,
-        selected: true,
-        wordCount: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    }),
-    prisma.source.count({ where }),
-  ])
+  // Cache only unfiltered pages — filtered queries are cheap and varied
+  const cacheable = !options.status && !trimmedSearch
 
-  return { data, meta: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+  const load = async () => {
+    const [data, total] = await Promise.all([
+      prisma.source.findMany({
+        where,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip,
+        take: pageSize,
+        select: {
+          id: true,
+          type: true,
+          title: true,
+          domain: true,
+          status: true,
+          selected: true,
+          wordCount: true,
+          progress: true,
+          processingError: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      }),
+      prisma.source.count({ where }),
+    ])
+    return { data, meta: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+  }
+
+  if (cacheable) {
+    return getOrSet(cacheKeys.notebookSources(notebookId, page, pageSize), cacheTtls.sourcesSec, load)
+  }
+  return load()
 }
 
 export async function getSource(sourceId: string, userId: string) {
-  const source = await prisma.source.findFirst({
+  return prisma.source.findFirst({
     where: {
       id: sourceId,
       deletedAt: null,
@@ -71,133 +92,167 @@ export async function getSource(sourceId: string, userId: string) {
         OR: [{ ownerId: userId }, { members: { some: { userId } } }],
       },
     },
-    include: {
+    select: {
+      id: true,
+      notebookId: true,
+      type: true,
+      title: true,
+      canonicalUrl: true,
+      domain: true,
+      status: true,
+      selected: true,
+      wordCount: true,
+      progress: true,
+      processingError: true,
+      createdAt: true,
+      updatedAt: true,
       chunks: {
-        select: { id: true, text: true, pageOffset: true, startOffset: true, endOffset: true },
+        select: { id: true, pageOffset: true, startOffset: true, endOffset: true },
+        take: 50,
+        orderBy: { startOffset: 'asc' },
       },
     },
   })
-  return source
+}
+
+/** Enqueue ingestion; if the queue is unavailable the source fails honestly (spec §78). */
+async function enqueueOrFail(
+  sourceId: string,
+  meta: { requestId?: string; userId?: string },
+  attemptCycle: number
+): Promise<void> {
+  try {
+    await enqueueIngestion({ sourceId, ...meta }, attemptCycle)
+  } catch {
+    await prisma.source
+      .update({
+        where: { id: sourceId },
+        data: { status: SourceStatus.failed, processingError: 'QUEUE_UNAVAILABLE', progress: 0 },
+      })
+      .catch(() => undefined)
+    throw serviceUnavailable('Processing queue is unavailable, please retry shortly')
+  }
 }
 
 export async function addUrlSource(
   notebookId: string,
   userId: string,
-  data: { url: string; title?: string }
+  data: { url: string; title?: string },
+  meta: { requestId?: string }
 ) {
-  const domain = extractDomain(data.url)
+  const domain = new URL(data.url).hostname
 
   const source = await prisma.source.create({
     data: {
       notebookId,
-      type: 'url',
-      title: data.title || domain,
+      type: SourceType.url,
+      title: (data.title || domain).slice(0, 200),
       canonicalUrl: data.url,
       domain,
-      status: 'queued',
+      status: SourceStatus.queued,
     },
   })
 
-  // Async processing (fire-and-forget for MVP; replace with job queue for production)
-  processUrlSource(source.id, data.url).catch(console.error)
+  await enqueueOrFail(source.id, { requestId: meta.requestId, userId }, 1)
+  invalidateSourceListCache(notebookId)
 
   return source
 }
 
 export async function addTextSource(
   notebookId: string,
-  data: { title: string; text: string }
+  userId: string,
+  data: { title: string; text: string },
+  meta: { requestId?: string }
 ) {
-  const wordCount = data.text.trim().split(/\s+/).length
+  const normalized = normalizeText(data.text)
 
-  const source = await prisma.source.create({
-    data: {
-      notebookId,
-      type: 'text',
-      title: data.title,
-      extractedText: data.text,
-      status: 'ready',
-      wordCount,
-    },
+  // Large pastes go through the worker pipeline like any other source
+  if (normalized.length > 20_000) {
+    const source = await prisma.source.create({
+      data: {
+        notebookId,
+        type: SourceType.text,
+        title: data.title,
+        extractedText: normalized,
+        status: SourceStatus.queued,
+      },
+    })
+    await enqueueOrFail(source.id, { requestId: meta.requestId, userId }, 1)
+    invalidateSourceListCache(notebookId)
+    return source
+  }
+
+  const chunks = chunkText(normalized)
+  const source = await prisma.$transaction(async (tx) => {
+    const created = await tx.source.create({
+      data: {
+        notebookId,
+        type: SourceType.text,
+        title: data.title,
+        extractedText: normalized,
+        status: SourceStatus.ready,
+        wordCount: countWords(normalized),
+        progress: 100,
+      },
+    })
+    if (chunks.length > 0) {
+      await tx.sourceChunk.createMany({
+        data: chunks.map((c) => ({
+          sourceId: created.id,
+          text: c.text,
+          startOffset: c.startOffset,
+          endOffset: c.endOffset,
+        })),
+      })
+    }
+    return created
   })
 
-  // Chunk immediately since text is already extracted
-  await chunkSource(source.id, data.text)
-
+  invalidateSourceListCache(notebookId)
+  invalidateRetrievalCache(notebookId)
   return source
 }
 
-export async function createUploadIntent(
+export function createUploadIntent(
   notebookId: string,
+  userId: string,
   data: { filename: string; contentType: string; size: number }
 ) {
-  // Validate MIME type
-  const allowedTypes = [
-    'application/pdf',
-    'image/png',
-    'image/jpeg',
-    'image/jpg',
-    'image/webp',
-    'text/plain',
-    'application/msword',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  ]
-
-  if (!allowedTypes.includes(data.contentType)) {
-    throw new Error(`Unsupported file type: ${data.contentType}`)
-  }
-
-  if (data.size > env.MAX_FILE_SIZE) {
-    throw new Error(`File too large. Max size: ${env.MAX_FILE_SIZE} bytes`)
-  }
-
-  const safeName = storage.sanitizeFilename(data.filename)
-  const filePath = storage.generatePath(notebookId, safeName)
-
-  return {
-    filePath,
-    uploadUrl: `/api/v1/internal/upload?path=${encodeURIComponent(filePath)}`,
-    // In production, return a signed S3/MinIO URL here instead
-  }
+  return uploadIntent.createUploadIntent(notebookId, userId, data)
 }
 
 export async function completeUpload(
   notebookId: string,
   userId: string,
-  data: { filePath: string; originalName: string }
+  data: { filePath: string },
+  meta: { requestId?: string }
 ) {
-  // Verify file exists on disk
-  if (!storage.fileExists(data.filePath)) {
-    throw new Error('Uploaded file not found')
-  }
-
-  const ext = data.originalName.split('.').pop()?.toLowerCase() || ''
-  const isImage = ['png', 'jpg', 'jpeg', 'webp'].includes(ext)
-  const isPdf = ext === 'pdf'
+  const intent = await uploadIntent.verifyUploadCompletion(data.filePath, userId)
 
   const source = await prisma.source.create({
     data: {
       notebookId,
-      type: 'upload',
-      title: data.originalName,
+      type: SourceType.upload,
+      title: intent.originalName,
       filePath: data.filePath,
-      status: 'queued',
+      status: SourceStatus.queued,
     },
   })
 
-  // Async processing
-  processUploadSource(source.id, data.filePath, { isImage, isPdf }).catch(console.error)
-
+  await enqueueOrFail(source.id, { requestId: meta.requestId, userId }, 1)
+  invalidateSourceListCache(notebookId)
   return source
 }
 
 export async function batchSelect(notebookId: string, sourceIds: string[], selected: boolean) {
-  await prisma.source.updateMany({
+  const result = await prisma.source.updateMany({
     where: { id: { in: sourceIds }, notebookId, deletedAt: null },
     data: { selected, updatedAt: new Date() },
   })
-
-  return { updated: sourceIds.length }
+  invalidateSourceListCache(notebookId)
+  invalidateRetrievalCache(notebookId)
+  return { updated: result.count }
 }
 
 export async function updateSource(
@@ -211,20 +266,20 @@ export async function updateSource(
       deletedAt: null,
       notebook: {
         deletedAt: null,
-        OR: [
-          { ownerId: userId },
-          { members: { some: { userId, role: { in: ['owner', 'editor'] } } } },
-        ],
+        OR: [{ ownerId: userId }, { members: { some: { userId, role: { in: ['owner', 'editor'] } } } }],
       },
     },
+    select: { id: true, notebookId: true },
   })
-
   if (!existing) return null
 
-  return prisma.source.update({
+  const updated = await prisma.source.update({
     where: { id: sourceId },
     data: { ...data, updatedAt: new Date() },
   })
+  invalidateSourceListCache(existing.notebookId)
+  invalidateRetrievalCache(existing.notebookId)
+  return updated
 }
 
 export async function softDeleteSource(sourceId: string, userId: string) {
@@ -234,171 +289,74 @@ export async function softDeleteSource(sourceId: string, userId: string) {
       deletedAt: null,
       notebook: {
         deletedAt: null,
-        OR: [
-          { ownerId: userId },
-          { members: { some: { userId, role: { in: ['owner', 'editor'] } } } },
-        ],
+        OR: [{ ownerId: userId }, { members: { some: { userId, role: { in: ['owner', 'editor'] } } } }],
       },
     },
+    select: { id: true, notebookId: true, filePath: true },
   })
-
   if (!existing) return null
 
-  // Delete file if exists
-  if (existing.filePath) {
-    storage.deleteFile(existing.filePath).catch(console.error)
-  }
-
-  return prisma.source.update({
+  const updated = await prisma.source.update({
     where: { id: sourceId },
-    data: { deletedAt: new Date(), updatedAt: new Date() },
+    data: { deletedAt: new Date(), selected: false, updatedAt: new Date() },
   })
+
+  invalidateSourceListCache(existing.notebookId)
+  invalidateRetrievalCache(existing.notebookId)
+
+  // Storage cleanup is asynchronous and must not fail the delete (spec §112)
+  if (existing.filePath) {
+    void storage.deleteFile(existing.filePath).catch(() => undefined)
+  }
+  return updated
 }
 
-export async function retrySource(sourceId: string, userId: string) {
+/**
+ * Retry a failed source (spec §113): guarded failed→queued transition so a
+ * concurrent retry cannot double-enqueue, previous error cleared, attempt
+ * counter incremented, then re-enqueued with a fresh job cycle.
+ */
+export async function retrySource(
+  sourceId: string,
+  userId: string,
+  meta: { requestId?: string }
+) {
   const existing = await prisma.source.findFirst({
     where: {
       id: sourceId,
       deletedAt: null,
-      status: 'failed',
+      status: SourceStatus.failed,
       notebook: {
         deletedAt: null,
-        OR: [
-          { ownerId: userId },
-          { members: { some: { userId, role: { in: ['owner', 'editor'] } } } },
-        ],
+        OR: [{ ownerId: userId }, { members: { some: { userId, role: { in: ['owner', 'editor'] } } } }],
       },
     },
+    select: { id: true, notebookId: true, processingAttempts: true },
   })
-
   if (!existing) return null
 
-  // Reset and re-queue
-  const updated = await prisma.source.update({
-    where: { id: sourceId },
+  const claimed = await prisma.source.updateMany({
+    where: { id: sourceId, status: SourceStatus.failed },
     data: {
-      status: 'queued',
+      status: SourceStatus.queued,
       processingError: null,
-      extractedText: null,
-      wordCount: null,
+      progress: 0,
+      processingAttempts: { increment: 1 },
       updatedAt: new Date(),
     },
   })
+  if (claimed.count === 0) return null // concurrent retry won the race
 
-  if (existing.type === 'upload' && existing.filePath) {
-    const ext = existing.title.split('.').pop()?.toLowerCase() || ''
-    processUploadSource(sourceId, existing.filePath, {
-      isImage: ['png', 'jpg', 'jpeg', 'webp'].includes(ext),
-      isPdf: ext === 'pdf',
-    }).catch(console.error)
-  } else if (existing.type === 'url' && existing.canonicalUrl) {
-    processUrlSource(sourceId, existing.canonicalUrl).catch(console.error)
-  }
-
-  return updated
-}
-
-// ─── Async Processing Pipeline ───
-
-async function processUrlSource(sourceId: string, url: string) {
-  try {
-    await prisma.source.update({ where: { id: sourceId }, data: { status: 'processing' } })
-
-    const { text, title, domain, author } = await ocr.extractWebPage(url)
-    const wordCount = text.trim().split(/\s+/).length
-
-    await prisma.source.update({
-      where: { id: sourceId },
-      data: {
-        title: title || undefined,
-        domain: domain || undefined,
-        author: author || undefined,
-        extractedText: text,
-        status: 'ready',
-        wordCount,
-        updatedAt: new Date(),
-      },
-    })
-
-    await chunkSource(sourceId, text)
-  } catch (err: any) {
-    console.error(`URL processing failed for ${sourceId}:`, err)
-    await prisma.source.update({
-      where: { id: sourceId },
-      data: {
-        status: 'failed',
-        processingError: err.message || 'Unknown error',
-        updatedAt: new Date(),
-      },
-    })
-  }
-}
-
-async function processUploadSource(
-  sourceId: string,
-  filePath: string,
-  meta: { isImage: boolean; isPdf: boolean }
-) {
-  try {
-    await prisma.source.update({ where: { id: sourceId }, data: { status: 'processing' } })
-
-    let text = ''
-    if (meta.isImage) {
-      text = await ocr.extractImageText(filePath)
-    } else if (meta.isPdf) {
-      text = await ocr.extractPdfText(filePath)
-    } else {
-      text = await ocr.extractPlainText(filePath)
-    }
-
-    const wordCount = text.trim().split(/\s+/).length
-
-    await prisma.source.update({
-      where: { id: sourceId },
-      data: {
-        extractedText: text,
-        status: 'ready',
-        wordCount,
-        updatedAt: new Date(),
-      },
-    })
-
-    await chunkSource(sourceId, text)
-  } catch (err: any) {
-    console.error(`Upload processing failed for ${sourceId}:`, err)
-    await prisma.source.update({
-      where: { id: sourceId },
-      data: {
-        status: 'failed',
-        processingError: err.message || 'Unknown error',
-        updatedAt: new Date(),
-      },
-    })
-  }
-}
-
-async function chunkSource(sourceId: string, text: string) {
-  // Simple chunking: 1000 chars with 200 char overlap
-  const CHUNK_SIZE = 1000
-  const OVERLAP = 200
-  const chunks: { text: string; startOffset: number; endOffset: number }[] = []
-
-  for (let i = 0; i < text.length; i += CHUNK_SIZE - OVERLAP) {
-    const end = Math.min(i + CHUNK_SIZE, text.length)
-    chunks.push({
-      text: text.slice(i, end),
-      startOffset: i,
-      endOffset: end,
-    })
-    if (end === text.length) break
-  }
-
-  await prisma.sourceChunk.createMany({
-    data: chunks.map((c) => ({
-      sourceId,
-      text: c.text,
-      startOffset: c.startOffset,
-      endOffset: c.endOffset,
-    })),
+  const refreshed = await prisma.source.findUnique({
+    where: { id: sourceId },
+    select: { processingAttempts: true },
   })
+
+  await enqueueOrFail(sourceId, { requestId: meta.requestId, userId }, (refreshed?.processingAttempts ?? 1) + 1)
+  invalidateSourceListCache(existing.notebookId)
+  invalidateRetrievalCache(existing.notebookId)
+
+  return prisma.source.findUnique({ where: { id: sourceId } })
 }
+
+export const MAX_SOURCE_TEXT_CHARS = env.CONTEXT_MAX_CHARS

@@ -1,225 +1,111 @@
 import { Request, Response, NextFunction } from 'express'
 import { getAuth, clerkClient } from '@clerk/express'
 import { prisma } from '../config/db'
+import { logger } from '../utils/logger'
+import { serviceUnavailable, unauthorized } from '../utils/errors'
+
+const log = logger.child({ component: 'auth' })
 
 /**
- * Authenticate an API request using Clerk.
+ * Authentication (spec §83): identity is always derived from the verified
+ * Clerk session token — never from client-supplied ids, emails or roles.
  *
- * IMPORTANT:
- * We intentionally do NOT use requireAuth().
- *
- * Clerk recommends using clerkMiddleware() globally and
- * getAuth() for protecting API routes.
+ * We intentionally use clerkMiddleware() globally + getAuth() per request
+ * instead of Clerk's requireAuth() (which 302-redirects; wrong for an API).
  */
-export function requireApiAuth(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
+export function requireApiAuth(req: Request, _res: Response, next: NextFunction) {
   try {
     const auth = getAuth(req)
-
     if (!auth.isAuthenticated || !auth.userId) {
-      return res.status(401).json({
-        data: null,
-        meta: {
-          requestId: req.requestId,
-        },
-        error: {
-          code: 'UNAUTHORIZED',
-          message: 'Authentication required',
-          retryable: false,
-        },
-      })
+      return next(unauthorized())
     }
-
     next()
-  } catch (err) {
-    console.error('[AUTH] Authentication check failed:', err)
-
-    return res.status(401).json({
-      data: null,
-      meta: {
-        requestId: req.requestId,
-      },
-      error: {
-        code: 'UNAUTHORIZED',
-        message: 'Invalid authentication session',
-        retryable: false,
-      },
-    })
+  } catch {
+    return next(unauthorized('Invalid authentication session'))
   }
 }
 
 /**
- * Temporary authentication diagnostics.
- *
- * This can remain during development while we verify the
- * authentication pipeline.
+ * Short-lived in-process cache for Clerk profile lookups. The Clerk Backend
+ * API call per request was the dominant latency source (30s hangs under
+ * degradation), so profiles are cached for 60s and served stale if Clerk
+ * is briefly unavailable.
  */
-export function debugAuth(
-  req: Request,
-  _res: Response,
-  next: NextFunction
-) {
-  const startedAt = Date.now()
+const PROFILE_TTL_MS = 60_000
+const profileCache = new Map<string, { email: string; displayName: string | null; avatarUrl: string | null; expiresAt: number }>()
 
-  console.log('\n========== AUTH DEBUG ==========')
-  console.log('[AUTH DEBUG] Method:', req.method)
-  console.log('[AUTH DEBUG] URL:', req.originalUrl)
-  console.log('[AUTH DEBUG] Request ID:', req.requestId)
-  console.log(
-    '[AUTH DEBUG] Authorization:',
-    req.headers.authorization ? 'PRESENT' : 'MISSING'
-  )
+interface ClerkProfile {
+  email: string
+  displayName: string | null
+  avatarUrl: string | null
+}
 
-  try {
-    const auth = getAuth(req)
-
-    console.log('[AUTH DEBUG] getAuth() completed')
-    console.log(
-      '[AUTH DEBUG] isAuthenticated:',
-      auth.isAuthenticated
-    )
-    console.log(
-      '[AUTH DEBUG] userId:',
-      auth.userId ?? 'NONE'
-    )
-    console.log(
-      '[AUTH DEBUG] sessionId:',
-      auth.sessionId ?? 'NONE'
-    )
-    console.log(
-      '[AUTH DEBUG] elapsed:',
-      `${Date.now() - startedAt}ms`
-    )
-
-    next()
-  } catch (err) {
-    console.error('[AUTH DEBUG] getAuth() failed:', err)
-    next(err)
+async function fetchClerkProfile(clerkUserId: string): Promise<ClerkProfile> {
+  const cached = profileCache.get(clerkUserId)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached
   }
+
+  const clerkUser = await clerkClient.users.getUser(clerkUserId)
+  const primaryEmail =
+    clerkUser.emailAddresses.find((e) => e.id === clerkUser.primaryEmailAddressId)?.emailAddress ??
+    clerkUser.emailAddresses[0]?.emailAddress ??
+    ''
+
+  const profile: ClerkProfile = {
+    email: primaryEmail,
+    displayName: clerkUser.firstName || clerkUser.username || null,
+    avatarUrl: clerkUser.imageUrl || null,
+  }
+
+  profileCache.set(clerkUserId, { ...profile, expiresAt: Date.now() + PROFILE_TTL_MS })
+  return profile
 }
 
 /**
- * Synchronize the authenticated Clerk user into the
- * local PostgreSQL database.
+ * Synchronizes the authenticated Clerk user into PostgreSQL and populates
+ * req.user. Runs after requireApiAuth on every authenticated route.
  */
-export async function syncUserToDb(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
-  const startedAt = Date.now()
-
+export async function syncUserToDb(req: Request, _res: Response, next: NextFunction) {
   try {
-    console.log('\n========== USER SYNC ==========')
-    console.log('[SYNC] Started')
-    console.log('[SYNC] Request:', req.method, req.originalUrl)
-
     const auth = getAuth(req)
-
-    console.log('[SYNC] getAuth() completed')
-    console.log('[SYNC] isAuthenticated:', auth.isAuthenticated)
-    console.log('[SYNC] Clerk user ID:', auth.userId ?? 'NONE')
-
     if (!auth.isAuthenticated || !auth.userId) {
-      console.log('[SYNC] Authentication missing')
-
-      return res.status(401).json({
-        data: null,
-        meta: {
-          requestId: req.requestId,
-        },
-        error: {
-          code: 'UNAUTHORIZED',
-          message: 'Authentication required',
-          retryable: false,
-        },
-      })
+      return next(unauthorized())
     }
 
-    /*
-     * Fetch the user from Clerk.
-     */
-    console.log('[SYNC] Calling Clerk users.getUser()...')
-
-    const clerkStartedAt = Date.now()
-
-    const clerkUser =
-      await clerkClient.users.getUser(auth.userId)
-
-    console.log(
-      '[SYNC] Clerk users.getUser() completed:',
-      `${Date.now() - clerkStartedAt}ms`
-    )
-
-    const primaryEmail =
-      clerkUser.emailAddresses.find(
-        (email) =>
-          email.id === clerkUser.primaryEmailAddressId
-      )?.emailAddress ??
-      clerkUser.emailAddresses[0]?.emailAddress ??
-      ''
-
-    console.log(
-      '[SYNC] Primary email:',
-      primaryEmail || 'NONE'
-    )
-
-    if (!primaryEmail) {
-      return res.status(400).json({
-        data: null,
-        meta: {
-          requestId: req.requestId,
-        },
-        error: {
-          code: 'BAD_REQUEST',
-          message: 'User has no email address',
-          retryable: false,
-        },
-      })
+    let profile: ClerkProfile
+    try {
+      profile = await fetchClerkProfile(auth.userId)
+    } catch (err) {
+      const stale = profileCache.get(auth.userId)
+      if (stale) {
+        log.warn({ clerkId: auth.userId }, 'Clerk profile fetch failed, using cached profile')
+        profile = { email: stale.email, displayName: stale.displayName, avatarUrl: stale.avatarUrl }
+      } else {
+        log.error({ err: (err as Error).message }, 'Clerk profile fetch failed with no cache')
+        return next(serviceUnavailable('Authentication provider unavailable'))
+      }
     }
 
-    /*
-     * Synchronize user with PostgreSQL.
-     */
-    console.log('[SYNC] Calling Prisma user.upsert()...')
-
-    const prismaStartedAt = Date.now()
+    if (!profile.email) {
+      return next(unauthorized('Account has no email address'))
+    }
 
     const user = await prisma.user.upsert({
-      where: {
-        clerkId: auth.userId,
-      },
+      where: { clerkId: auth.userId },
       update: {
-        email: primaryEmail,
-        displayName:
-          clerkUser.firstName ||
-          clerkUser.username ||
-          null,
-        avatarUrl:
-          clerkUser.imageUrl || null,
+        email: profile.email,
+        displayName: profile.displayName,
+        avatarUrl: profile.avatarUrl,
         updatedAt: new Date(),
       },
       create: {
         clerkId: auth.userId,
-        email: primaryEmail,
-        displayName:
-          clerkUser.firstName ||
-          clerkUser.username ||
-          null,
-        avatarUrl:
-          clerkUser.imageUrl || null,
+        email: profile.email,
+        displayName: profile.displayName,
+        avatarUrl: profile.avatarUrl,
       },
     })
-
-    console.log(
-      '[SYNC] Prisma user.upsert() completed:',
-      `${Date.now() - prismaStartedAt}ms`
-    )
-
-    console.log('[SYNC] Local user ID:', user.id)
 
     req.user = {
       id: user.id,
@@ -228,38 +114,9 @@ export async function syncUserToDb(
       displayName: user.displayName,
       avatarUrl: user.avatarUrl,
     }
-
-    console.log('[SYNC] req.user populated')
-    console.log(
-      '[SYNC] Total elapsed:',
-      `${Date.now() - startedAt}ms`
-    )
-
-    console.log('================================\n')
-
     next()
   } catch (err) {
-    console.error('\n========== USER SYNC ERROR ==========')
-    console.error('[SYNC ERROR]', err)
-
-    if (err instanceof Error) {
-      console.error('[SYNC ERROR MESSAGE]', err.message)
-      console.error('[SYNC ERROR STACK]', err.stack)
-    }
-
-    console.error('======================================\n')
-
-    return res.status(500).json({
-      data: null,
-      meta: {
-        requestId: req.requestId,
-      },
-      error: {
-        code: 'AUTH_SYNC_FAILED',
-        message: 'Failed to sync user session',
-        retryable: true,
-      },
-    })
+    log.error({ err: (err as Error).message }, 'User sync failed')
+    next(serviceUnavailable('Failed to sync user session'))
   }
 }
-

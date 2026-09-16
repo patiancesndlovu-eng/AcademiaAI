@@ -1,8 +1,7 @@
 import type { ReactNode } from "react";
 import { useState, useRef } from "react";
-import { Search, ChevronDown, Sparkles, UploadCloud, Link2, FileText, Loader2, Globe2 } from "lucide-react";
+import { UploadCloud, Link2, FileText, Loader2 } from "lucide-react";
 import { ModalShell } from "./ModalShell";
-import { GoogleDriveMark, YouTubeMark } from "@/components/common/Primitives";
 import { addUrlSource, addTextSource, createUploadIntent, completeUpload, getClerkToken, API_BASE } from "@/lib/api";
 
 function ModalAction({ icon, label, onClick, disabled }: { icon: ReactNode; label: string; onClick: () => void; disabled?: boolean }) {
@@ -18,15 +17,15 @@ interface AddSourcesModalProps {
   onClose: () => void;
   onSourcesAdded: (sources: any[]) => void;
   onToast: (message: string) => void;
+  initialMode?: "url" | "text" | null;
 }
 
-export function AddSourcesModal({ notebookId, onClose, onSourcesAdded, onToast }: AddSourcesModalProps) {
-  const [mode, setMode] = useState<'url' | 'text' | 'upload' | null>(null);
+export function AddSourcesModal({ notebookId, onClose, onSourcesAdded, onToast, initialMode = null }: AddSourcesModalProps) {
+  const [mode, setMode] = useState<'url' | 'text' | 'upload' | null>(initialMode);
   const [url, setUrl] = useState("");
   const [textTitle, setTextTitle] = useState("");
   const [textBody, setTextBody] = useState("");
   const [loading, setLoading] = useState(false);
-  const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleAddUrl = async () => {
@@ -97,22 +96,14 @@ export function AddSourcesModal({ notebookId, onClose, onSourcesAdded, onToast }
     }
   };
 
-  const onDrag = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === "dragenter" || e.type === "dragover") setDragActive(true);
-    else if (e.type === "dragleave") setDragActive(false);
+  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.[0]) handleFileUpload(e.target.files[0]);
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setDragActive(false);
     if (e.dataTransfer.files?.[0]) handleFileUpload(e.dataTransfer.files[0]);
-  };
-
-  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files?.[0]) handleFileUpload(e.target.files[0]);
   };
 
   return (
@@ -122,31 +113,17 @@ export function AddSourcesModal({ notebookId, onClose, onSourcesAdded, onToast }
 
         {!mode && (
           <>
-            <div className="mt-6 rounded-2xl border border-[#5971c5] bg-[#17191d] p-3 ring-1 ring-[#445796]/30">
-              <div className="flex items-center gap-2 text-sm text-[#cfd4dc]">
-                <Search size={17} className="text-[#929aa8]" />
-                <span>Search the web for new sources</span>
-                <Search size={17} className="ml-auto text-[#9db5ff]" />
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button className="flex items-center gap-1.5 rounded-full bg-[#2b3039] px-3 py-2 text-xs text-[#e2e5eb]"><Globe2 size={14} /> Web <ChevronDown size={13} /></button>
-                <button className="flex items-center gap-1.5 rounded-full bg-[#2b3039] px-3 py-2 text-xs text-[#e2e5eb]"><Sparkles size={14} className="text-[#a0b8ff]" /> Quick scan <ChevronDown size={13} /></button>
-              </div>
-            </div>
-            <div
-              className={`mt-7 flex min-h-[210px] flex-col items-center justify-center rounded-2xl border border-dashed ${dragActive ? 'border-[#7ea7ff] bg-[#252a36]' : 'border-[#535965] bg-[#1e2024]'} px-6 text-center transition`}
-              onDragEnter={onDrag} onDragLeave={onDrag} onDragOver={onDrag} onDrop={onDrop}
+            <div className="mt-7 flex min-h-[210px] flex-col items-center justify-center rounded-2xl border border-dashed bg-[#1e2024] px-6 text-center transition"
+              onDrop={onDrop}
             >
               <UploadCloud size={28} className="text-[#9fa8b7]" />
-              <h3 className="mt-4 font-display text-[18px] text-[#e7eaf0] sm:text-[20px]">Or drop your files</h3>
-              <p className="mt-1 text-sm text-[#939aa7]">pdfs, images, docs, audio, and more</p>
+              <h3 className="mt-4 font-display text-[18px] text-[#e7eaf0] sm:text-[20px]">Drop your files here</h3>
+              <p className="mt-1 text-sm text-[#939aa7]">PDFs, images, text files, and more</p>
               <input ref={fileInputRef} type="file" className="hidden" onChange={onFileChange} accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.doc,.docx" />
               <div className="mt-6 flex flex-wrap justify-center gap-2">
                 <ModalAction icon={<UploadCloud size={15} />} label="Upload files" onClick={() => fileInputRef.current?.click()} disabled={loading} />
                 <ModalAction icon={<Link2 size={15} />} label="Add URL" onClick={() => setMode('url')} disabled={loading} />
                 <ModalAction icon={<FileText size={15} />} label="Paste text" onClick={() => setMode('text')} disabled={loading} />
-                <ModalAction icon={<YouTubeMark />} label="Websites" onClick={() => setMode('url')} disabled={loading} />
-                <ModalAction icon={<GoogleDriveMark />} label="Drive" onClick={() => onToast("Drive connection is coming soon")} disabled={loading} />
               </div>
             </div>
           </>
@@ -163,7 +140,6 @@ export function AddSourcesModal({ notebookId, onClose, onSourcesAdded, onToast }
                 onChange={(e) => setUrl(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleAddUrl(); }}
                 placeholder="https://example.com/article"
-                /* FIX: single focus ring */
                 className="mt-2 w-full rounded-xl border border-[#4b515c] bg-[#15171a] px-4 py-3 text-sm text-[#eef0f4] outline-none transition placeholder:text-[#7e8794] focus:border-[#6b8eef] focus:ring-2 focus:ring-[#5f75b1]/40"
               />
               <div className="mt-4 flex justify-end gap-3">

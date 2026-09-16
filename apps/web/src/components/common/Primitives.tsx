@@ -1,20 +1,31 @@
-import type { ReactNode } from "react";
+import { forwardRef, type ReactNode } from "react";
 import { BookOpen, NotebookPen, FileText, Globe2 } from "lucide-react";
 
 export const MARK_URL = "/manus-storage/academiaai-mark_e370d65a.png";
 
-export function IconButton({ label, children, onClick, active = false, className = "" }: { label: string; children: ReactNode; onClick?: () => void; active?: boolean; className?: string }) {
-  return (
-    <button
-      aria-label={label}
-      title={label}
-      onClick={onClick}
-      className={`inline-flex h-9 w-9 items-center justify-center rounded-full border border-transparent text-[#aeb4bf] transition duration-150 hover:border-[#41454e] hover:bg-[#2b2e35] hover:text-white active:scale-[0.97] ${active ? "bg-[#30343d] text-white" : ""} ${className}`}
-    >
-      {children}
-    </button>
-  );
+interface IconButtonProps {
+  label: string;
+  children: ReactNode;
+  onClick?: () => void;
+  active?: boolean;
+  className?: string;
 }
+
+export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(
+  function IconButton({ label, children, onClick, active = false, className = "" }, ref) {
+    return (
+      <button
+        ref={ref}
+        aria-label={label}
+        title={label}
+        onClick={onClick}
+        className={`inline-flex h-9 w-9 items-center justify-center rounded-full border border-transparent text-[#aeb4bf] transition duration-150 hover:border-[#41454e] hover:bg-[#2b2e35] hover:text-white active:scale-[0.97] ${active ? "bg-[#30343d] text-white" : ""} ${className}`}
+      >
+        {children}
+      </button>
+    );
+  }
+);
 
 export function PillButton({ label, children, onClick, filled = false, className = "" }: { label?: string; children: ReactNode; onClick?: () => void; filled?: boolean; className?: string }) {
   return (
