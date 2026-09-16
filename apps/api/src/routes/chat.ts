@@ -19,9 +19,10 @@ const router = Router()
 const notebookIdSchema = z.object({ id: z.string().cuid() })
 
 const sendMessageSchema = z.object({
-  content: z.string().min(1).max(8000),
+  content: z.string().trim().min(1).max(8000),
   sourceIds: z.array(z.string().cuid()).max(50).optional(),
   webEnhanced: z.boolean().optional(),
+  style: z.enum(['concise', 'detailed', 'academic']).optional(),
 })
 
 const listMessagesQuerySchema = z.object({
@@ -87,7 +88,7 @@ router.post(
   async (req, res, next) => {
     const user = req.user!
     const notebookId = req.notebook!.id
-    const { content, sourceIds, webEnhanced = false } = req.body
+    const { content, sourceIds, webEnhanced = false, style = 'concise' } = req.body
     const startedAt = Date.now()
 
     // Everything before the stream starts uses regular JSON errors
@@ -151,7 +152,9 @@ router.post(
 
       const context = chatService.buildContextBlocks(chunks)
       const webContext = webSearchApplied ? buildWebSearchContext(webResults) : ''
-      const contents = chatService.buildContents(content, history, context, webContext)
+      // Style hint shapes only this generation; the persisted user message stays verbatim.
+      const styledQuestion = style === 'concise' ? content : `${content}\n\n[Answer style: ${style}]`
+      const contents = chatService.buildContents(styledQuestion, history, context, webContext)
 
       send('message.started', {
         userMessageId: userMessage.id,
@@ -262,6 +265,26 @@ router.post(
     } finally {
       clearInterval(heartbeat)
       if (!clientDisconnected) res.end()
+    }
+  }
+)
+
+/**
+ * DELETE /api/v1/notebooks/:id/chat/messages — clear notebook chat history (editor+).
+ * Citations cascade-delete with their messages.
+ */
+router.delete(
+  '/notebooks/:id/chat/messages',
+  requireApiAuth,
+  syncUserToDb,
+  requireNotebookRole('editor'),
+  validateParams(notebookIdSchema),
+  async (req, res, next) => {
+    try {
+      const deleted = await chatService.clearMessages(req.notebook!.id)
+      res.json(success({ deleted }, req.requestId))
+    } catch (err) {
+      next(err)
     }
   }
 )

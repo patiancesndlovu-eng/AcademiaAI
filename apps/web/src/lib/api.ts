@@ -19,7 +19,22 @@ export const api = axios.create({
   timeout: 30000,
 })
 
+type TokenGetter = () => Promise<string | null>
+let clerkTokenGetter: TokenGetter | null = null
+
+/** Wired once from a component inside <ClerkProvider> via useAuth(). */
+export function setClerkTokenGetter(getter: TokenGetter): void {
+  clerkTokenGetter = getter
+}
+
 export async function getClerkToken(): Promise<string | null> {
+  if (clerkTokenGetter) {
+    try {
+      return await clerkTokenGetter()
+    } catch {
+      // fall through to window fallback
+    }
+  }
   try {
     const clerk = (window as any).Clerk || (window as any).__clerk
     if (clerk?.session?.getToken) {
@@ -32,7 +47,13 @@ export async function getClerkToken(): Promise<string | null> {
 }
 
 api.interceptors.request.use(async (config) => {
-  const token = await getClerkToken()
+  // One short retry: Clerk's session is often still initializing on first mount,
+  // and a null token here means a pointless 401 there.
+  let token = await getClerkToken()
+  if (!token) {
+    await new Promise((r) => setTimeout(r, 400))
+    token = await getClerkToken()
+  }
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -173,16 +194,28 @@ export async function getChatMessages(notebookId: string, params?: { limit?: num
   return data
 }
 
+export async function clearChatMessages(notebookId: string): Promise<{ deleted: number }> {
+  const { data } = await api.delete(`/notebooks/${notebookId}/chat/messages`)
+  return data
+}
+
 export interface SSEEvent {
   event: string
   data: any
 }
 
-export async function* streamChat(
+export interface ChatError {
+  code: string
+  message: string
+  retryable: boolean
+}
+
+export async function streamChat(
   notebookId: string,
-  body: { content: string; sourceIds?: string[]; webEnhanced?: boolean },
-  onEvent: (event: SSEEvent) => void
-): AsyncGenerator<void> {
+  body: { content: string; sourceIds?: string[]; webEnhanced?: boolean; style?: 'concise' | 'detailed' | 'academic' },
+  onEvent: (event: SSEEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
   // Retry getting Clerk token up to 3 times with backoff
   let token: string | null = null
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -202,11 +235,26 @@ export async function* streamChat(
       Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(body),
+    signal,
   })
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: { message: 'Chat request failed' } }))
-    throw new Error(err.error?.message || 'Chat request failed')
+    const payload = await res.json().catch(() => null)
+    const backendErr = payload?.error as ChatError | undefined
+    if (res.status === 401) {
+      const err: ChatError = {
+        code: 'UNAUTHENTICATED',
+        message: 'Your session expired. Please sign in again.',
+        retryable: false,
+      }
+      throw err
+    }
+    const err: ChatError = {
+      code: backendErr?.code ?? 'CHAT_REQUEST_FAILED',
+      message: backendErr?.message ?? `Chat request failed (${res.status})`,
+      retryable: backendErr?.retryable ?? (res.status >= 500 || res.status === 429),
+    }
+    throw err
   }
 
   const reader = res.body?.getReader()

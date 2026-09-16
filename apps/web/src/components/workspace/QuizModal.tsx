@@ -20,12 +20,13 @@ function Segment({ label, options, value, onChange }: { label: string; options: 
 }
 
 interface QuizModalProps {
+  notebookId: string;
   selectedSources: any[];
   onClose: () => void;
   onGenerated: (job: GenerationJob) => void;
 }
 
-export function QuizModal({ selectedSources, onClose, onGenerated }: QuizModalProps) {
+export function QuizModal({ notebookId, selectedSources, onClose, onGenerated }: QuizModalProps) {
   const [count, setCount] = useState("Standard");
   const [difficulty, setDifficulty] = useState("Medium");
   const [topic, setTopic] = useState("");
@@ -34,7 +35,12 @@ export function QuizModal({ selectedSources, onClose, onGenerated }: QuizModalPr
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sourcesRef = useRef<HTMLButtonElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hasSources = selectedSources.length > 0;
+
+  useEffect(() => () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+  }, []);
 
   const countMap = { Fewer: 5, Standard: 10, More: 20 };
   const difficultyMap = { Easy: 'easy', Medium: 'medium', Hard: 'hard' };
@@ -45,7 +51,7 @@ export function QuizModal({ selectedSources, onClose, onGenerated }: QuizModalPr
     setError(null);
 
     try {
-      const res = await createGeneration(selectedSources[0]?.notebookId || '', {
+      const res = await createGeneration(notebookId, {
         type: 'quiz',
         config: {
           questionCount: countMap[count as keyof typeof countMap],
@@ -64,13 +70,13 @@ export function QuizModal({ selectedSources, onClose, onGenerated }: QuizModalPr
   };
 
   const pollJob = async (jobId: string) => {
-    const notebookId = selectedSources[0]?.notebookId || '';
     let attempts = 0;
     const maxAttempts = 60; // ~5 minutes with 5s intervals
 
     const interval = setInterval(async () => {
       if (attempts >= maxAttempts) {
         clearInterval(interval);
+        pollRef.current = null;
         setPolling(false);
         setError('Generation timed out');
         return;
@@ -81,11 +87,13 @@ export function QuizModal({ selectedSources, onClose, onGenerated }: QuizModalPr
         const job = await getGeneration(notebookId, jobId);
         if (job.status === 'completed') {
           clearInterval(interval);
+          pollRef.current = null;
           setPolling(false);
           onGenerated(job);
           onClose();
         } else if (job.status === 'failed' || job.status === 'cancelled') {
           clearInterval(interval);
+          pollRef.current = null;
           setPolling(false);
           setError(job.error || `Generation ${job.status}`);
         }
@@ -94,15 +102,8 @@ export function QuizModal({ selectedSources, onClose, onGenerated }: QuizModalPr
       }
     }, 5000);
 
-    // Cleanup on unmount
-    return () => clearInterval(interval);
+    pollRef.current = interval;
   };
-
-  useEffect(() => {
-    if (polling) {
-      // polling is handled in handleGenerate
-    }
-  }, [polling]);
 
   return (
     <ModalShell title="Quiz" onClose={onClose}>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Link2, Loader2, Trash2 } from "lucide-react";
+import { Check, Link2, Loader2, Trash2, UserPlus, X } from "lucide-react";
 import { ModalShell } from "@/components/workspace/ModalShell";
-import { updateNotebook, deleteNotebook } from "@/lib/api";
+import { updateNotebook, deleteNotebook, addMember, removeMember } from "@/lib/api";
 
 function formatDate(dateStr: string) {
   const d = new Date(dateStr);
@@ -92,10 +92,17 @@ export function ShareModal({ notebook, onClose, onToast, onNotebookUpdated }: { 
   const [copied, setCopied] = useState(false);
   const [visibility, setVisibility] = useState<string>(notebook.visibility ?? "private");
   const [saving, setSaving] = useState(false);
+  const [members, setMembers] = useState<any[]>(notebook.members ?? []);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"viewer" | "editor">("viewer");
+  const [inviting, setInviting] = useState(false);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const isOwner = notebook.myRole === "owner";
 
   useEffect(() => {
     setVisibility(notebook.visibility ?? "private");
-  }, [notebook.visibility]);
+    setMembers(notebook.members ?? []);
+  }, [notebook.visibility, notebook.members]);
 
   const copyLink = async () => {
     try {
@@ -105,6 +112,21 @@ export function ShareModal({ notebook, onClose, onToast, onNotebookUpdated }: { 
       setTimeout(() => setCopied(false), 2000);
     } catch {
       onToast("Failed to copy link");
+    }
+  };
+
+  const invite = async () => {
+    if (!email.trim() || inviting) return;
+    setInviting(true);
+    try {
+      const member = await addMember(notebook.id, { email: email.trim(), role });
+      setMembers((prev) => [...prev, member]);
+      setEmail("");
+      onToast("Collaborator invited");
+    } catch (e: any) {
+      onToast(e?.message || "Failed to invite collaborator");
+    } finally {
+      setInviting(false);
     }
   };
 
@@ -160,6 +182,77 @@ export function ShareModal({ notebook, onClose, onToast, onNotebookUpdated }: { 
             ))}
           </div>
           <p className="mt-3 text-[11px] leading-5 text-[#8f96a3]">Only the notebook owner can change sharing.</p>
+        </div>
+
+        <div className="mt-6">
+          <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#858c98]">Collaborators</p>
+          {members.length === 0 ? (
+            <p className="text-[12px] text-[#9ba2ae]">No collaborators yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {members.map((m: any) => (
+                <div key={m.id} className="flex items-center gap-3 rounded-xl border border-[#3b3f48] bg-[#25282d] px-3.5 py-2.5">
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13px] text-[#e4e7ec]">{m.user?.displayName || m.user?.email || m.userId}</span>
+                    <span className="block text-[11px] capitalize text-[#8f96a3]">{m.role}</span>
+                  </span>
+                  {isOwner && m.role !== "owner" && (
+                    <button
+                      onClick={async () => {
+                        setRemovingId(m.userId);
+                        try {
+                          await removeMember(notebook.id, m.userId);
+                          setMembers((prev) => prev.filter((x) => x.userId !== m.userId));
+                          onToast("Collaborator removed");
+                        } catch (e: any) {
+                          onToast(e?.message || "Failed to remove collaborator");
+                        } finally {
+                          setRemovingId(null);
+                        }
+                      }}
+                      disabled={removingId === m.userId}
+                      aria-label={`Remove ${m.user?.email || m.userId}`}
+                      title="Remove collaborator"
+                      className="rounded-full p-1.5 text-[#7e8693] transition hover:bg-[#2c3037] hover:text-white disabled:opacity-40"
+                    >
+                      {removingId === m.userId ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {isOwner ? (
+            <div className="mt-3 flex gap-2">
+              <input
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") void invite(); }}
+                type="email"
+                placeholder="teammate@example.com"
+                aria-label="Collaborator email"
+                className="h-11 min-w-0 flex-1 rounded-xl border border-[#4b515c] bg-[#15171a] px-4 text-sm text-[#eef0f4] outline-none transition placeholder:text-[#7e8794] focus:border-[#6b8eef] focus:ring-2 focus:ring-[#5f75b1]/40"
+              />
+              <select
+                value={role}
+                onChange={(e) => setRole(e.target.value as "viewer" | "editor")}
+                aria-label="Collaborator role"
+                className="h-11 shrink-0 rounded-xl border border-[#4b515c] bg-[#15171a] px-3 text-sm text-[#eef0f4] outline-none focus:border-[#6b8eef]"
+              >
+                <option value="viewer">Viewer</option>
+                <option value="editor">Editor</option>
+              </select>
+              <button
+                disabled={!email.trim() || inviting}
+                onClick={() => void invite()}
+                className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full bg-[#6f8ff0] px-4 text-[13px] font-semibold text-[#141b2d] transition hover:bg-[#92abff] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {inviting ? <Loader2 size={14} className="animate-spin" /> : <UserPlus size={14} />} Invite
+              </button>
+            </div>
+          ) : (
+            <p className="mt-3 text-[11px] leading-5 text-[#8f96a3]">Only the notebook owner can invite collaborators.</p>
+          )}
         </div>
       </div>
     </ModalShell>

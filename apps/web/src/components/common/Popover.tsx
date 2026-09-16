@@ -13,7 +13,9 @@ interface PopoverProps {
 export function Popover({ open, onClose, anchorRef, align = "left", className = "", children }: PopoverProps) {
   const ref = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (!open) return;

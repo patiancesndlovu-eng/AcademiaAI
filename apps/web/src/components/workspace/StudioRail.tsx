@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { PanelRight, Sparkles, Clipboard, ChevronRight, Headphones, Layers3, Video, Network, FileCheck2, BookOpenCheck, HelpCircle, ImageIcon, Grid2X2, Loader2, X, Check, AlertCircle } from "lucide-react";
 import { ModalShell } from "./ModalShell";
 import { QuizModal } from "./QuizModal";
-import { createGeneration, getGeneration } from "@/lib/api";
+import { createGeneration, getGeneration, getGenerations, getNotes, createNote, deleteNote, type GenerationJob, type Note } from "@/lib/api";
 
 type StudioKind = "audio" | "slides" | "video" | "map" | "report" | "flashcards" | "quiz" | "infographic" | "table" | "summary" | "mindmap";
 
@@ -13,6 +13,9 @@ export interface StudioOutput {
   detail?: string;
   createdAt: number;
 }
+
+/** Backend generation types: quiz, flashcards, summary, report, mindmap. Others are honest coming-soon tiles. */
+const SUPPORTED_KINDS = new Set<StudioKind>(["quiz", "flashcards", "report", "summary", "mindmap"]);
 
 const studioItems: { kind: StudioKind; title: string; description: string; tint: string; icon: React.ReactNode; beta?: boolean }[] = [
   { kind: "audio", title: "Audio brief", description: "Listen to the key ideas", tint: "bg-[#31443f]", icon: <Headphones size={16} /> },
@@ -51,12 +54,81 @@ function relativeTime(timestamp: number) {
 interface StudioRailProps {
   onToggle: () => void;
   onUsePrompt: (text: string) => void;
-  onAddNote: (text: string) => void;
-  outputs: StudioOutput[];
-  onRemoveOutput: (id: string) => void;
+  onToast?: (message: string) => void;
   selectedSourceCount: number;
   notebookId: string;
   sources: any[];
+}
+
+function OutputViewer({ job, onClose }: { job: GenerationJob; onClose: () => void }) {
+  const [revealed, setRevealed] = useState<Set<number>>(new Set());
+  const content = (job.output?.content ?? {}) as any;
+  const title = job.output?.title ?? `${job.type.charAt(0).toUpperCase() + job.type.slice(1)}`;
+
+  const toggle = (i: number) =>
+    setRevealed((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+
+  return (
+    <ModalShell title={title} onClose={onClose}>
+      <div className="mx-auto max-w-[560px] space-y-4 text-[14px] leading-6 text-[#ccd1da]">
+        {job.type === 'quiz' && Array.isArray(content.questions) && content.questions.map((q: any, i: number) => (
+          <div key={i} className="rounded-xl border border-[#3b3f48] bg-[#25282d] p-4">
+            <p className="font-medium text-[#eef0f4]">{i + 1}. {q.question}</p>
+            <div className="mt-2 space-y-1.5">
+              {(q.options ?? []).map((opt: string, j: number) => (
+                <p key={j} className={`rounded-lg px-3 py-1.5 text-[13px] ${revealed.has(i) && j === q.correctIndex ? "bg-[#274239] text-[#d6eee4]" : "bg-[#1e2024] text-[#c8ccd4]"}`}>
+                  {String.fromCharCode(65 + j)}. {opt}
+                </p>
+              ))}
+            </div>
+            <button onClick={() => toggle(i)} className="mt-2 text-[12px] text-[#9ebaff] underline hover:text-white">
+              {revealed.has(i) ? "Hide answer" : "Show answer"}
+            </button>
+            {revealed.has(i) && q.explanation && <p className="mt-1 text-[12px] text-[#9ba2ae]">{q.explanation}</p>}
+          </div>
+        ))}
+        {job.type === 'flashcards' && Array.isArray(content.cards) && content.cards.map((c: any, i: number) => (
+          <div key={i} className="rounded-xl border border-[#3b3f48] bg-[#25282d] p-4">
+            <p className="font-medium text-[#eef0f4]">{c.front}</p>
+            <p className="mt-2 border-t border-[#30343b] pt-2 text-[13px]">{c.back}</p>
+          </div>
+        ))}
+        {job.type === 'summary' && (
+          <div className="rounded-xl border border-[#3b3f48] bg-[#25282d] p-4">
+            <p>{content.summary}</p>
+            {Array.isArray(content.keyPoints) && content.keyPoints.length > 0 && (
+              <ul className="mt-3 list-disc space-y-1 pl-5 text-[13px]">
+                {content.keyPoints.map((k: string, i: number) => <li key={i}>{k}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+        {job.type === 'report' && Array.isArray(content.sections) && content.sections.map((s: any, i: number) => (
+          <div key={i} className="rounded-xl border border-[#3b3f48] bg-[#25282d] p-4">
+            <p className="font-display text-[16px] text-[#f0f2f6]">{s.heading}</p>
+            <p className="mt-1.5 text-[13px]">{s.content}</p>
+          </div>
+        ))}
+        {job.type === 'mindmap' && content.root && <MindmapNode node={content.root} depth={0} />}
+      </div>
+    </ModalShell>
+  );
+}
+
+function MindmapNode({ node, depth }: { node: any; depth: number }) {
+  return (
+    <div className={depth > 0 ? "ml-4 border-l border-[#3b3f48] pl-3" : ""}>
+      <p className={`${depth === 0 ? "font-display text-[18px] text-[#f0f2f6]" : "text-[13px] text-[#e4e7ec]"}`}>{node.label}</p>
+      <div className="mt-1.5 space-y-1.5">
+        {(node.children ?? []).map((c: any) => <MindmapNode key={c.id} node={c} depth={depth + 1} />)}
+      </div>
+    </div>
+  );
 }
 
 function NoteModal({ onClose, onSave }: { onClose: () => void; onSave: (text: string) => void }) {
@@ -138,8 +210,7 @@ function GenerationConfigModal({
     ];
 
   useEffect(() => {
-    setConfig({});
-    configFields.forEach(f => { config[f.key] = f.default; });
+    setConfig(Object.fromEntries(configFields.map((f) => [f.key, f.default])));
   }, [kind]);
 
   useEffect(() => {
@@ -265,10 +336,67 @@ function GenerationConfigModal({
   );
 }
 
-export function StudioRail({ onToggle, onUsePrompt, onAddNote, outputs, onRemoveOutput, selectedSourceCount, notebookId, sources }: StudioRailProps) {
+export function StudioRail({ onToggle, onUsePrompt, onToast, selectedSourceCount, notebookId, sources }: StudioRailProps) {
   const [activeModal, setActiveModal] = useState<StudioKind | null>(null);
   const [noteOpen, setNoteOpen] = useState(false);
   const [quizOpen, setQuizOpen] = useState(false);
+  const [serverJobs, setServerJobs] = useState<GenerationJob[]>([]);
+  const [serverNotes, setServerNotes] = useState<Note[]>([]);
+  const [viewing, setViewing] = useState<GenerationJob | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [jobs, notes] = await Promise.all([getGenerations(notebookId), getNotes(notebookId)]);
+        if (cancelled) return;
+        setServerJobs(jobs);
+        setServerNotes(notes);
+      } catch {
+        if (!cancelled) {
+          setServerJobs([]);
+          setServerNotes([]);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [notebookId]);
+
+  const refreshServerJobs = async () => {
+    try {
+      setServerJobs(await getGenerations(notebookId));
+    } catch {
+      // keep last-known list on failure; never wipe good state
+    }
+  };
+
+  const refreshServerNotes = async () => {
+    try {
+      setServerNotes(await getNotes(notebookId));
+    } catch {
+      // keep last-known list on failure; never wipe good state
+    }
+  };
+
+  const handleSaveNote = async (text: string) => {
+    try {
+      await createNote(notebookId, { body: text });
+      await refreshServerNotes();
+      onToast?.("Note saved to Studio");
+    } catch (e: any) {
+      onToast?.(e?.message || "Failed to save note");
+    }
+  };
+
+  const handleDeleteNote = async (noteId: string) => {
+    try {
+      await deleteNote(notebookId, noteId);
+      setServerNotes((prev) => prev.filter((n) => n.id !== noteId));
+      onToast?.("Note deleted");
+    } catch (e: any) {
+      onToast?.(e?.message || "Failed to delete note");
+    }
+  };
 
   const handleItemClick = (item: typeof studioItems[0]) => {
     if (item.kind === "quiz") {
@@ -294,19 +422,52 @@ export function StudioRail({ onToggle, onUsePrompt, onAddNote, outputs, onRemove
             </span>
           </button>
           <div className="grid grid-cols-2 gap-2">
-            {studioItems.map((item) => (
-              <button key={item.kind} onClick={() => handleItemClick(item)} className={`group min-h-[74px] rounded-xl border border-white/[0.04] ${item.tint} p-3 text-left transition hover:-translate-y-0.5 hover:border-white/20 hover:brightness-110 active:scale-[0.98]`}>
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-[#d8deea]">{item.icon}</span>
-                  {item.beta && <span className="rounded bg-[#1d2024]/75 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[#eef1f5]">Beta</span>}
-                  <ChevronRight size={14} className="ml-auto text-[#a9afb9] transition group-hover:translate-x-0.5" />
-                </div>
-                <p className="mt-2 text-[12px] font-medium text-[#e4e7ec]">{item.title}</p>
-              </button>
-            ))}
+            {studioItems.map((item) => {
+              const supported = SUPPORTED_KINDS.has(item.kind);
+              return (
+                <button
+                  key={item.kind}
+                  onClick={() => handleItemClick(item)}
+                  disabled={!supported}
+                  title={supported ? item.description : `${item.title} is coming soon`}
+                  aria-disabled={!supported}
+                  className={`group min-h-[74px] rounded-xl border border-white/[0.04] ${item.tint} p-3 text-left transition active:scale-[0.98] ${supported ? "hover:-translate-y-0.5 hover:border-white/20 hover:brightness-110" : "cursor-not-allowed opacity-50"}`}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[#d8deea]">{item.icon}</span>
+                    {!supported
+                      ? <span className="rounded bg-[#1d2024]/75 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[#eef1f5]">Soon</span>
+                      : item.beta && <span className="rounded bg-[#1d2024]/75 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[#eef1f5]">Beta</span>}
+                    {supported && <ChevronRight size={14} className="ml-auto text-[#a9afb9] transition group-hover:translate-x-0.5" />}
+                  </div>
+                  <p className="mt-2 text-[12px] font-medium text-[#e4e7ec]">{item.title}</p>
+                </button>
+              );
+            })}
           </div>
           <div className="mt-5 border-t border-[#30343b] pt-6">
-            {outputs.length === 0 ? (
+            {serverJobs.length > 0 && (
+              <div className="mb-5 space-y-2">
+                <p className="px-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#858c98]">Generated</p>
+                {serverJobs.map((job) => (
+                  <button
+                    key={job.id}
+                    onClick={() => { if (job.status === 'completed' && job.output) setViewing(job); }}
+                    disabled={job.status !== 'completed' || !job.output}
+                    className="flex w-full items-start gap-2.5 rounded-xl border border-white/[0.05] bg-[#26292f] p-3 text-left transition hover:border-white/20 disabled:cursor-default"
+                  >
+                    <span className="mt-0.5 shrink-0 text-[#9ebaff]">{outputIcon((job.output?.type ?? job.type) as StudioOutput["kind"])}</span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[12px] font-medium text-[#e4e7ec]">{job.output?.title ?? `${job.type.charAt(0).toUpperCase() + job.type.slice(1)}`}</p>
+                      <p className="mt-1 text-[10px] text-[#707783]">
+                        {job.status === 'completed' ? `Ready · ${relativeTime(new Date(job.updatedAt).getTime())}` : job.status === 'failed' ? `Failed${job.error ? ` · ${job.error}` : ''}` : `${job.status} · ${job.progress}%`}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            {serverJobs.length === 0 && serverNotes.length === 0 ? (
               <div className="text-center">
                 <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-[#2d3652] text-[#91adff]">
                   <Sparkles size={21} />
@@ -316,16 +477,15 @@ export function StudioRail({ onToggle, onUsePrompt, onAddNote, outputs, onRemove
               </div>
             ) : (
               <div className="space-y-2">
-                <p className="px-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#858c98]">Saved in this notebook</p>
-                {outputs.map((output) => (
-                  <div key={output.id} className="flex items-start gap-2.5 rounded-xl border border-white/[0.05] bg-[#26292f] p-3">
-                    <span className="mt-0.5 shrink-0 text-[#9ebaff]">{outputIcon(output.kind)}</span>
+                <p className="px-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#858c98]">Notes</p>
+                {serverNotes.map((note) => (
+                  <div key={note.id} className="flex items-start gap-2.5 rounded-xl border border-white/[0.05] bg-[#26292f] p-3">
+                    <span className="mt-0.5 shrink-0 text-[#9ebaff]"><Clipboard size={14} /></span>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-[12px] font-medium text-[#e4e7ec]">{output.title}</p>
-                      {output.detail && <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[#8f96a3]">{output.detail}</p>}
-                      <p className="mt-1 text-[10px] text-[#707783]">{output.kind === "note" ? "Note" : "Draft"} · {relativeTime(output.createdAt)}</p>
+                      <p className="line-clamp-2 text-[12px] leading-4 text-[#e4e7ec]">{note.body}</p>
+                      <p className="mt-1 text-[10px] text-[#707783]">Note · {relativeTime(new Date(note.createdAt).getTime())}</p>
                     </div>
-                    <button onClick={() => onRemoveOutput(output.id)} aria-label={`Remove ${output.title}`} title={`Remove ${output.title}`} className="rounded-full p-1 text-[#7e8693] transition hover:bg-[#2c3037] hover:text-white">
+                    <button onClick={() => handleDeleteNote(note.id)} aria-label="Delete note" title="Delete note" className="rounded-full p-1 text-[#7e8693] transition hover:bg-[#2c3037] hover:text-white">
                       <X size={13} />
                     </button>
                   </div>
@@ -347,24 +507,36 @@ export function StudioRail({ onToggle, onUsePrompt, onAddNote, outputs, onRemove
           title={studioItems.find(i => i.kind === activeModal)?.title || activeModal}
           sourceCount={selectedSourceCount}
           onClose={() => setActiveModal(null)}
-          onGenerate={() => {}}
+          onGenerate={() => {
+            void refreshServerJobs();
+            onToast?.("Output generated — see Generated above");
+          }}
           notebookId={notebookId}
         />
       )}
       {quizOpen && (
         <QuizModal
+          notebookId={notebookId}
           selectedSources={sources.filter((s) => s.selected)}
           onClose={() => setQuizOpen(false)}
           onGenerated={() => {
             setQuizOpen(false);
+            void refreshServerJobs();
+            onToast?.("Quiz generated — see Generated above");
           }}
         />
       )}
       {noteOpen && (
         <NoteModal
           onClose={() => setNoteOpen(false)}
-          onSave={onAddNote}
+          onSave={(text) => {
+            setNoteOpen(false);
+            void handleSaveNote(text);
+          }}
         />
+      )}
+      {viewing && (
+        <OutputViewer job={viewing} onClose={() => setViewing(null)} />
       )}
     </>
   );

@@ -2,12 +2,13 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { ArrowRight, SlidersHorizontal, MoreVertical, BrainCircuit, Sparkles, Trash2, Download, MessageSquarePlus, Globe2, Loader2 } from "lucide-react";
 import { IconButton } from "@/components/common/Primitives";
 import { Popover, PopoverItem } from "@/components/common/Popover";
-import { streamChat, type ChatMessage as APIChatMessage, getChatMessages } from "@/lib/api";
+import { streamChat, clearChatMessages, type ChatMessage as APIChatMessage, getChatMessages } from "@/lib/api";
 
 interface ChatCanvasProps {
   notebook: any;
   sources: any[];
   promptSeed?: { text: string; id: number } | null;
+  onToast?: (message: string) => void;
 }
 
 interface ChatMessage extends APIChatMessage {
@@ -21,18 +22,18 @@ function formatDate(dateStr: string) {
 }
 
 function createUserMessage(content: string): ChatMessage {
-  return { id: `temp-${Date.now()}`, role: 'user', content, streaming: false, createdAt: new Date().toISOString() };
+  return { id: `temp-u-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, role: 'user', content, streaming: false, createdAt: new Date().toISOString() };
 }
 
 function createAssistantMessage(content: string, streaming = true): ChatMessage {
-  return { id: `temp-${Date.now()}`, role: 'assistant', content, streaming, createdAt: new Date().toISOString() };
+  return { id: `temp-a-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, role: 'assistant', content, streaming, createdAt: new Date().toISOString() };
 }
 
 function createErrorMessage(error: { code: string; message: string; retryable: boolean }): ChatMessage {
-  return { id: `temp-${Date.now()}`, role: 'assistant', content: '', streaming: false, error, createdAt: new Date().toISOString() };
+  return { id: `temp-e-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, role: 'assistant', content: '', streaming: false, error, createdAt: new Date().toISOString() };
 }
 
-export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
+export function ChatCanvas({ notebook, sources, promptSeed, onToast }: ChatCanvasProps) {
   const [prompt, setPrompt] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [style, setStyle] = useState<"concise" | "detailed" | "academic">("concise");
@@ -49,6 +50,11 @@ export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
   const styleRef = useRef<HTMLButtonElement>(null);
   const optionsRef = useRef<HTMLButtonElement>(null);
   const settingsRef = useRef<HTMLButtonElement>(null);
+  const inFlightRef = useRef<AbortController | null>(null);
+  const lastAttemptRef = useRef<string | null>(null);
+  const historyReqRef = useRef(0);
+  // Citations arrive as separate SSE events before message.completed; collect per send.
+  const pendingCitationsRef = useRef<{ sourceId: string; quote: string | null; page: number | null }[]>([]);
   const selectedSources = sources.filter((s) => s.selected);
   const sourceCount = selectedSources.length;
 
@@ -75,7 +81,34 @@ export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
   }, [promptSeed?.id]);
 
   useEffect(() => {
-    loadHistory();
+    setMessages([]);
+    setNextCursor(null);
+    setHasMoreHistory(true);
+    setSending(false);
+    inFlightRef.current?.abort();
+    inFlightRef.current = null;
+    const req = ++historyReqRef.current;
+    let cancelled = false;
+    (async () => {
+      setLoadingHistory(true);
+      try {
+        const result = await getChatMessages(notebook.id, { limit: 50 });
+        if (cancelled || historyReqRef.current !== req) return;
+        // Backend returns newest-first; display oldest-first.
+        setMessages([...result.data].reverse());
+        setNextCursor(result.meta.nextCursor);
+        setHasMoreHistory(result.meta.hasMore);
+      } catch (e: any) {
+        if (!cancelled) console.error('Failed to load chat history:', e);
+      } finally {
+        if (!cancelled && historyReqRef.current === req) setLoadingHistory(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      inFlightRef.current?.abort();
+      inFlightRef.current = null;
+    };
   }, [notebook.id]);
 
   async function loadHistory(cursor?: string) {
@@ -83,7 +116,7 @@ export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
     setLoadingHistory(true);
     try {
       const result = await getChatMessages(notebook.id, { limit: 50, cursor });
-      setMessages((prev) => cursor ? [...result.data, ...prev] : result.data);
+      setMessages((prev) => cursor ? [...[...result.data].reverse(), ...prev] : [...result.data].reverse());
       setNextCursor(result.meta.nextCursor);
       setHasMoreHistory(result.meta.hasMore);
     } catch (e: any) {
@@ -100,6 +133,16 @@ export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
   const handleSSEEvent = useCallback((event: { event: string; data: any }) => {
     switch (event.event) {
       case 'message.started':
+        if (event.data.userMessageId) {
+          const realId = event.data.userMessageId as string;
+          setMessages((prev) => {
+            const idx = prev.map((m) => m.role).lastIndexOf('user');
+            if (idx < 0 || !prev[idx].id.startsWith('temp-')) return prev;
+            const next = [...prev];
+            next[idx] = { ...next[idx], id: realId };
+            return next;
+          });
+        }
         break;
       case 'message.delta':
         if (event.data.text) {
@@ -113,17 +156,28 @@ export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
         }
         break;
       case 'citation':
+        if (event.data?.sourceId) {
+          pendingCitationsRef.current.push({
+            sourceId: event.data.sourceId,
+            quote: event.data.quote ?? null,
+            page: event.data.page ?? null,
+          });
+        }
         break;
-      case 'message.completed':
+      case 'message.completed': {
+        const citations = pendingCitationsRef.current;
+        pendingCitationsRef.current = [];
         setMessages((prev) => {
           const last = prev[prev.length - 1];
           if (last && last.role === 'assistant' && last.streaming) {
-            return [...prev.slice(0, -1), { ...last, streaming: false, citations: event.data.citations, modelMeta: event.data.modelMeta }];
+            return [...prev.slice(0, -1), { ...last, id: event.data.messageId ?? last.id, streaming: false, citations, modelMeta: event.data.model }];
           }
-          return [...prev, { ...createAssistantMessage('', false), citations: event.data.citations, modelMeta: event.data.modelMeta }];
+          return [...prev, { ...createAssistantMessage('', false), id: event.data.messageId ?? `temp-a-${Date.now()}`, citations, modelMeta: event.data.model }];
         });
+        lastAttemptRef.current = null;
         setSending(false);
         break;
+      }
       case 'message.error':
         setMessages((prev) => {
           const last = prev[prev.length - 1];
@@ -139,10 +193,16 @@ export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
     }
   }, []);
 
-  const sendPrompt = async () => {
-    if (!prompt.trim() || sending) return;
-    const nextPrompt = prompt.trim();
-    setMessages((current) => [...current, createUserMessage(nextPrompt)]);
+  const sendText = async (text: string) => {
+    if (!text.trim() || sending) return;
+    const nextPrompt = text.trim();
+    inFlightRef.current?.abort();
+    const controller = new AbortController();
+    inFlightRef.current = controller;
+    lastAttemptRef.current = nextPrompt;
+    pendingCitationsRef.current = [];
+    // Instant feedback: user message + streaming placeholder before the first delta.
+    setMessages((current) => [...current, createUserMessage(nextPrompt), createAssistantMessage('', true)]);
     setPrompt("");
     setSending(true);
 
@@ -151,16 +211,56 @@ export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
         content: nextPrompt,
         sourceIds: selectedSources.map(s => s.id),
         webEnhanced,
-      }, handleSSEEvent);
+        style,
+      }, handleSSEEvent, controller.signal);
     } catch (e: any) {
-      setMessages((prev) => [...prev, createErrorMessage({ code: 'AI_GENERATION_FAILED', message: e.message || 'Failed to generate response', retryable: true })]);
+      if (controller.signal.aborted) {
+        // Aborted by a newer send or unmount; the new attempt owns the UI state.
+        if (inFlightRef.current === controller) setSending(false);
+        return;
+      }
+      const failure = {
+        code: e?.code ?? 'AI_GENERATION_FAILED',
+        message: e?.message || 'Failed to generate response',
+        retryable: e?.retryable ?? true,
+      };
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && last.role === 'assistant' && last.streaming) {
+          return [...prev.slice(0, -1), createErrorMessage(failure)];
+        }
+        return [...prev, createErrorMessage(failure)];
+      });
+      setPrompt((current) => current || nextPrompt);
       setSending(false);
+      textareaRef.current?.focus();
+    } finally {
+      if (inFlightRef.current === controller) inFlightRef.current = null;
     }
   };
 
-  const clearChat = () => {
-    setMessages([]);
+  const sendPrompt = () => {
+    void sendText(prompt);
+  };
+
+  const retryLast = () => {
+    const last = lastAttemptRef.current;
+    if (last) void sendText(last);
+  };
+
+  const clearChat = async () => {
     setOptionsOpen(false);
+    if (sending) return;
+    const previous = messages;
+    setMessages([]);
+    try {
+      await clearChatMessages(notebook.id);
+      lastAttemptRef.current = null;
+      onToast?.("Chat cleared");
+    } catch (e: any) {
+      setMessages(previous);
+      onToast?.(e?.message || "Failed to clear chat");
+    }
   };
 
   const exportChat = () => {
@@ -188,7 +288,7 @@ export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
             <span>⚠</span>
             <span>{message.error.message}</span>
             {message.error.retryable && (
-              <button onClick={sendPrompt} className="ml-2 text-xs underline hover:text-white">Retry</button>
+              <button onClick={retryLast} className="ml-2 min-h-[44px] text-xs underline hover:text-white">Retry</button>
             )}
           </div>
         </div>
@@ -197,10 +297,16 @@ export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
     if (message.streaming) {
       return (
         <div key={message.id} className="flex justify-start">
-          <div className="flex items-center gap-2 rounded-2xl border border-[#3b404a] bg-[#282b31] px-4 py-3 text-[14px] text-[#ccd1da]">
-            <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "0ms" }} />
-            <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "150ms" }} />
-            <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "300ms" }} />
+          <div className="max-w-[88%] rounded-2xl border border-[#3b404a] bg-[#282b31] px-4 py-3 text-[14px] leading-6 text-[#ccd1da]">
+            {message.content ? (
+              <span>{message.content}<span className="ml-0.5 inline-block h-4 w-[7px] animate-pulse rounded-[2px] bg-[#7ea7ff] align-middle" /></span>
+            ) : (
+              <span className="flex items-center gap-2">
+                <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "0ms" }} />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "150ms" }} />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "300ms" }} />
+              </span>
+            )}
           </div>
         </div>
       );
@@ -305,7 +411,7 @@ export function ChatCanvas({ notebook, sources, promptSeed }: ChatCanvasProps) {
             ref={textareaRef}
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
-            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendPrompt(); } }}
+            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendPrompt(); } }}
             rows={1}
             placeholder="Ask a question or create something"
             className="max-h-28 min-h-[34px] flex-1 resize-none bg-transparent px-2 py-1.5 text-[14px] leading-6 text-[#eef0f4] outline-none placeholder:text-[#858d99]"

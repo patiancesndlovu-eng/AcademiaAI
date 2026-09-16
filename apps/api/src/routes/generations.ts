@@ -56,6 +56,7 @@ router.get(
       const jobs = await prisma.generationJob.findMany({
         where: { notebookId: req.notebook!.id },
         orderBy: { createdAt: 'desc' },
+        include: { output: true },
       })
       res.json(success(jobs, req.requestId))
     } catch (err) {

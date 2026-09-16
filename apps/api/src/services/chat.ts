@@ -169,6 +169,12 @@ export async function persistAssistantMessage(
   })
 }
 
+/** Delete all chat history for a notebook. Citations cascade-delete with messages. */
+export async function clearMessages(notebookId: string): Promise<number> {
+  const result = await prisma.chatMessage.deleteMany({ where: { notebookId } })
+  return result.count
+}
+
 // ─── Message listing (cursor pagination, spec §71) ───
 
 export interface MessageListResult {

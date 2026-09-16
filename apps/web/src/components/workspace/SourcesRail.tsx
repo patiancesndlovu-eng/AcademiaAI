@@ -1,8 +1,8 @@
 import { useMemo, useState, useEffect, useRef } from "react";
-import { Plus, Search, Sparkles, Globe2, ChevronDown, PanelLeft, SlidersHorizontal, MoreVertical, Check, Loader2, Download, ExternalLink } from "lucide-react";
+import { Plus, Search, Sparkles, Globe2, ChevronDown, PanelLeft, SlidersHorizontal, MoreVertical, Check, Loader2, Download, ExternalLink, Trash2, RotateCcw } from "lucide-react";
 import { SourceGlyph } from "@/components/common/Primitives";
 import { Popover, PopoverItem } from "@/components/common/Popover";
-import { batchSelectSources } from "@/lib/api";
+import { batchSelectSources, deleteSource, retrySource } from "@/lib/api";
 
 interface SourcesRailProps {
   notebookId: string;
@@ -39,7 +39,11 @@ function capitalize(text: string) {
 export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onToggle, onToast }: SourcesRailProps) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Mirror of `selected` for async handlers: rapid toggles read the latest
+  // value instead of a stale closure, so no toggle is lost.
+  const selectedRef = useRef<Set<string>>(new Set());
   const [syncing, setSyncing] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<"relevance" | "date" | "title">("relevance");
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
   const [scopeFilter, setScopeFilter] = useState<"all" | "selected">("all");
@@ -53,7 +57,9 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
   const actionsRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    setSelected(new Set(sources.filter((s) => s.selected).map((s) => s.id)));
+    const next = new Set(sources.filter((s) => s.selected).map((s) => s.id));
+    selectedRef.current = next;
+    setSelected(next);
   }, [sources]);
 
   /* Local filter + sort */
@@ -75,16 +81,18 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
   }, [sources, query, sortBy, typeFilter, scopeFilter, selected]);
 
   const allSelected = filtered.length > 0 && filtered.every((source) => selected.has(source.id));
-  const linkedSources = useMemo(() => sources.filter((s) => s.url), [sources]);
+  const linkedSources = useMemo(() => sources.filter((s) => s.canonicalUrl), [sources]);
 
   const toggleAll = async () => {
-    const next = new Set(selected);
+    const current = selectedRef.current;
     const targetIds = filtered.map((s) => s.id);
+    const next = new Set(current);
     if (allSelected) {
       targetIds.forEach((id) => next.delete(id));
     } else {
       targetIds.forEach((id) => next.add(id));
     }
+    selectedRef.current = next;
     setSelected(next);
     try {
       setSyncing(true);
@@ -92,24 +100,30 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
       onSourcesChanged(sources.map((s) => ({ ...s, selected: next.has(s.id) })));
     } catch (e: any) {
       onToast("Failed to update selection");
-      setSelected(new Set(sources.filter((s) => s.selected).map((s) => s.id)));
+      const revert = new Set(sources.filter((s) => s.selected).map((s) => s.id));
+      selectedRef.current = revert;
+      setSelected(revert);
     } finally {
       setSyncing(false);
     }
   };
 
   const toggleOne = async (id: string) => {
-    const next = new Set(selected);
+    const current = selectedRef.current;
+    const next = new Set(current);
     const isSelected = next.has(id);
     if (isSelected) next.delete(id);
     else next.add(id);
+    selectedRef.current = next;
     setSelected(next);
     try {
       await batchSelectSources(notebookId, { sourceIds: [id], selected: !isSelected });
       onSourcesChanged(sources.map((s) => ({ ...s, selected: next.has(s.id) })));
     } catch (e: any) {
       onToast("Failed to update selection");
-      setSelected(new Set(sources.filter((s) => s.selected).map((s) => s.id)));
+      const revert = new Set(sources.filter((s) => s.selected).map((s) => s.id));
+      selectedRef.current = revert;
+      setSelected(revert);
     }
   };
 
@@ -118,6 +132,34 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
     sources.forEach((s) => types.add(s.type));
     return Array.from(types);
   }, [sources]);
+
+  const handleDelete = async (id: string) => {
+    if (busyId) return;
+    setBusyId(id);
+    try {
+      await deleteSource(id);
+      onSourcesChanged(sources.filter((s) => s.id !== id));
+      onToast("Source deleted");
+    } catch (e: any) {
+      onToast(e?.message || "Failed to delete source");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleRetry = async (id: string) => {
+    if (busyId) return;
+    setBusyId(id);
+    try {
+      const updated = await retrySource(id);
+      onSourcesChanged(sources.map((s) => (s.id === id ? { ...s, status: updated.status ?? 'queued', processingError: null } : s)));
+      onToast("Source requeued for processing");
+    } catch (e: any) {
+      onToast(e?.message || "Failed to retry source");
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const exportSources = () => {
     setActionsOpen(false);
@@ -134,7 +176,7 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
 
   const openLinkedSources = () => {
     setActionsOpen(false);
-    linkedSources.forEach((source) => window.open(source.url, "_blank", "noopener,noreferrer"));
+    linkedSources.forEach((source) => window.open(source.canonicalUrl, "_blank", "noopener,noreferrer"));
   };
 
   return (
@@ -226,17 +268,37 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
         )}
         {filtered.map((source) => {
           const isSelected = selected.has(source.id);
+          const isBusy = busyId === source.id;
+          const isFailed = source.status === 'failed';
+          const isProcessing = source.status === 'queued' || source.status === 'processing';
           return (
-            <button key={source.id} onClick={() => toggleOne(source.id)} className={`flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition hover:bg-[#292c32] ${isSelected ? "" : "opacity-55"}`}>
-              <SourceGlyph kind={mapTypeToKind(source.type)} color={source.domain ? stringToColor(source.domain) : stringToColor(source.type)} />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12px] text-[#d8dbe1]">{source.title}</span>
-                <span className="mt-0.5 block truncate text-[10px] text-[#858d9a]">{source.domain || source.type}</span>
-              </span>
-              <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${isSelected ? "border-[#8caeff] bg-[#708fe1] text-[#182030]" : "border-[#656c77] text-transparent"}`}>
-                <Check size={12} strokeWidth={3} />
-              </span>
-            </button>
+            <div key={source.id} className={`flex w-full items-center gap-1.5 rounded-xl px-2.5 py-2 transition hover:bg-[#292c32] ${isSelected ? "" : "opacity-55"}`}>
+              <button onClick={() => toggleOne(source.id)} aria-pressed={isSelected} aria-label={`${isSelected ? "Deselect" : "Select"} ${source.title}`} className="flex min-w-0 flex-1 items-center gap-2.5 text-left">
+                <SourceGlyph kind={mapTypeToKind(source.type)} color={source.domain ? stringToColor(source.domain) : stringToColor(source.type)} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[12px] text-[#d8dbe1]">{source.title}</span>
+                  <span className="mt-0.5 block truncate text-[10px] text-[#858d9a]">
+                    {isFailed ? "Processing failed" : isProcessing ? `Processing…${typeof source.progress === 'number' ? ` ${source.progress}%` : ''}` : (source.domain || source.type)}
+                  </span>
+                  {isFailed && (
+                    <span className="mt-0.5 block truncate text-[10px] text-[#e8b9b9]">
+                      {source.processingError || "Something went wrong during processing"}
+                    </span>
+                  )}
+                </span>
+                <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${isSelected ? "border-[#8caeff] bg-[#708fe1] text-[#182030]" : "border-[#656c77] text-transparent"}`}>
+                  <Check size={12} strokeWidth={3} />
+                </span>
+              </button>
+              {isFailed && (
+                <button onClick={() => handleRetry(source.id)} disabled={isBusy} aria-label={`Retry ${source.title}`} title="Retry processing" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[#9ebaff] transition hover:bg-[#2c3037] hover:text-white disabled:opacity-40">
+                  {isBusy ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+                </button>
+              )}
+              <button onClick={() => handleDelete(source.id)} disabled={isBusy} aria-label={`Delete ${source.title}`} title="Delete source" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[#7e8693] transition hover:bg-[#2c3037] hover:text-white disabled:opacity-40">
+                {isBusy ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              </button>
+            </div>
           );
         })}
       </div>

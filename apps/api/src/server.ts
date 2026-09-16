@@ -16,6 +16,10 @@ import authRoutes from './routes/auth'
 import notebookRoutes from './routes/notebooks'
 import sourceRoutes from './routes/sources'
 import chatRoutes from './routes/chat'
+import generationRoutes from './routes/generations'
+import noteRoutes from './routes/notes'
+import sharingRoutes from './routes/sharing'
+import outputRoutes from './routes/outputs'
 import uploadRouter from './routes/upload'
 
 dotenv.config()
@@ -78,6 +82,10 @@ app.use('/api/v1/notebooks', globalLimiter, notebookRoutes)
 app.use('/api/v1/internal/upload', uploadRouter)
 app.use('/api/v1', globalLimiter, sourceRoutes) // /notebooks/:id/sources/* and /sources/*
 app.use('/api/v1', chatRoutes) // chat limiter applied per-route (per-user)
+app.use('/api/v1', globalLimiter, generationRoutes)
+app.use('/api/v1', globalLimiter, noteRoutes)
+app.use('/api/v1', globalLimiter, sharingRoutes)
+app.use('/api/v1', globalLimiter, outputRoutes)
 
 // ─── 404 + errors ───
 app.use((req, res) => {

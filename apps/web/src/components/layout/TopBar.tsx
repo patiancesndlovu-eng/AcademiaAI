@@ -81,6 +81,13 @@ export function TopBar({ mode, notebookTitle, onCreate, onToast, notebook, sourc
         <div className="relative">
           <IconButton ref={moreRef} label="More options" active={menuOpen} onClick={() => setMenuOpen((v) => !v)}><MoreVertical size={19} /></IconButton>
           <Popover open={menuOpen} onClose={() => setMenuOpen(false)} anchorRef={moreRef} align="right" className="w-56">
+            {mode === "notebook" && notebook && (
+              <>
+                <PopoverItem icon={<BarChart3 size={16} />} onClick={() => { setMenuOpen(false); setDialog("insights"); }}>Insights</PopoverItem>
+                <PopoverItem icon={<Share2 size={16} />} onClick={() => { setMenuOpen(false); setDialog("share"); }}>Share</PopoverItem>
+                <PopoverItem icon={<Settings size={16} />} onClick={() => { setMenuOpen(false); setDialog("settings"); }}>Settings</PopoverItem>
+              </>
+            )}
             <PopoverItem icon={<HelpCircle size={16} />} onClick={() => { setMenuOpen(false); setDialog("help"); }}>AcademiaAi help</PopoverItem>
             <PopoverItem icon={<Zap size={16} />} onClick={() => { setMenuOpen(false); setDialog("shortcuts"); }}>Keyboard shortcuts</PopoverItem>
             <PopoverItem icon={<Globe2 size={16} />} onClick={() => { setMenuOpen(false); setLangOpen(true); }}>Output language — {language}</PopoverItem>

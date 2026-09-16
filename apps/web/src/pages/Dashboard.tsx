@@ -72,6 +72,8 @@ export default function Dashboard() {
   const [createOpen, setCreateOpen] = useState(false);
   const [notebooks, setNotebooks] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [me, setMe] = useState<any>(null);
   const [meLoaded, setMeLoaded] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -87,17 +89,21 @@ export default function Dashboard() {
     async function load() {
       try {
         setLoading(true);
+        setLoadError(null);
         const data = await getNotebooks({ scope: 'all', sort: 'updated' });
         if (!cancelled) setNotebooks(data || []);
       } catch (e: any) {
-        if (!cancelled) setToast(e.message || "Failed to load notebooks");
+        if (!cancelled) {
+          setLoadError(e.message || "Failed to load notebooks");
+          setToast(e.message || "Failed to load notebooks");
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
     load();
     return () => { cancelled = true; };
-  }, []);
+  }, [reloadKey]);
 
   /* Current user, needed to split "My notebooks" from "Discover" by ownerId */
   useEffect(() => {
@@ -222,6 +228,28 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
+          <div className="mt-3 flex gap-2 md:hidden">
+            <div className="relative flex-1">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#858c98]" />
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search notebooks…"
+                aria-label="Search notebooks"
+                className="h-11 w-full rounded-full border border-[#3d414a] bg-[#25282d] pl-9 pr-3 text-[13px] text-[#d2d5dc] outline-none transition placeholder:text-[#858c98] focus:border-[#6b8eef] focus:ring-2 focus:ring-[#5f75b1]/40"
+              />
+            </div>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+              aria-label="Sort notebooks"
+              className="h-11 shrink-0 rounded-full border border-[#3d414a] bg-[#25282d] px-3 text-[13px] text-[#d2d5dc] outline-none focus:border-[#6b8eef]"
+            >
+              <option value="recent">Recent</option>
+              <option value="title">Title</option>
+              <option value="sources">Sources</option>
+            </select>
+          </div>
 
           <section className="mt-10">
             <div className="mb-5">
@@ -291,7 +319,12 @@ export default function Dashboard() {
                 ))}
                 {visibleNotebooks.length === 0 && !loading && (
                   <div className="flex min-h-[194px] flex-col items-center justify-center rounded-[17px] border border-dashed border-[#565c68] bg-[#25282d] px-6 text-center">
-                    {searchQuery ? (
+                    {loadError && notebooks.length === 0 ? (
+                      <>
+                        <p className="text-sm text-[#e8b9b9]">Couldn&apos;t load notebooks. {loadError}</p>
+                        <button onClick={() => setReloadKey((k) => k + 1)} className="mt-3 rounded-full bg-[#6f8ff0] px-5 py-2.5 text-[13px] font-semibold text-[#141b2d] transition hover:bg-[#92abff] active:scale-[0.98]">Retry</button>
+                      </>
+                    ) : searchQuery ? (
                       <p className="text-sm text-[#9fa6b3]">No notebooks match your search.</p>
                     ) : tab === "All" ? (
                       <p className="text-sm text-[#9fa6b3]">No notebooks yet. Create your first one to get started.</p>

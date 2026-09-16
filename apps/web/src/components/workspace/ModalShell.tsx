@@ -14,7 +14,12 @@ export function ModalShell({ title, onClose, children, size = "standard" }: Moda
       if (event.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    const original = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = original;
+    };
   }, [onClose]);
 
   return (
@@ -27,7 +32,7 @@ export function ModalShell({ title, onClose, children, size = "standard" }: Moda
             </span>
             <h2 className="font-display text-[18px] text-[#f0f2f6]">{title}</h2>
           </div>
-          <button onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full bg-[#373b43] text-[#d6d9df] transition hover:bg-[#4a4f59] hover:text-white">
+          <button onClick={onClose} aria-label="Close modal" className="flex h-9 w-9 items-center justify-center rounded-full bg-[#373b43] text-[#d6d9df] transition hover:bg-[#4a4f59] hover:text-white">
             <X size={18} />
           </button>
         </div>
