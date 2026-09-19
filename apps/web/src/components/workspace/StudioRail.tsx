@@ -1,8 +1,21 @@
-import { useState } from "react";
-import { PanelLeft, Sparkles, Clipboard, ChevronRight, Headphones, Layers3, Video, Network, FileCheck2, BookOpenCheck, HelpCircle, ImageIcon, Grid2X2, Loader2, X } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { PanelRight, Sparkles, Clipboard, ChevronRight, Headphones, Layers3, Video, Network, FileCheck2, BookOpenCheck, HelpCircle, ImageIcon, Grid2X2, Loader2, X, Check, AlertCircle } from "lucide-react";
 import { ModalShell } from "./ModalShell";
+import { QuizModal } from "./QuizModal";
+import { createGeneration, getGeneration, getGenerations, getNotes, createNote, deleteNote, type GenerationJob, type Note } from "@/lib/api";
 
-type StudioKind = "audio" | "slides" | "video" | "map" | "report" | "flashcards" | "quiz" | "infographic" | "table";
+type StudioKind = "audio" | "slides" | "video" | "map" | "report" | "flashcards" | "quiz" | "infographic" | "table" | "summary" | "mindmap";
+
+export interface StudioOutput {
+  id: string;
+  kind: StudioKind | "note" | "draft";
+  title: string;
+  detail?: string;
+  createdAt: number;
+}
+
+/** Backend generation types: quiz, flashcards, summary, report, mindmap. Others are honest coming-soon tiles. */
+const SUPPORTED_KINDS = new Set<StudioKind>(["quiz", "flashcards", "report", "summary", "mindmap"]);
 
 const studioItems: { kind: StudioKind; title: string; description: string; tint: string; icon: React.ReactNode; beta?: boolean }[] = [
   { kind: "audio", title: "Audio brief", description: "Listen to the key ideas", tint: "bg-[#31443f]", icon: <Headphones size={16} /> },
@@ -14,33 +27,133 @@ const studioItems: { kind: StudioKind; title: string; description: string; tint:
   { kind: "quiz", title: "Quiz", description: "Test your understanding", tint: "bg-[#35404a]", icon: <HelpCircle size={16} /> },
   { kind: "infographic", title: "Infographic", description: "Make the pattern visible", tint: "bg-[#463a3f]", icon: <ImageIcon size={16} />, beta: true },
   { kind: "table", title: "Data table", description: "Organize key details", tint: "bg-[#343c48]", icon: <Grid2X2 size={16} /> },
+  { kind: "summary", title: "Summary", description: "Concise overview", tint: "bg-[#444432]", icon: <FileCheck2 size={16} /> },
+  { kind: "mindmap", title: "Mind map", description: "Visual connections", tint: "bg-[#343c48]", icon: <Network size={16} /> },
 ];
 
-interface StudioRailProps {
-  onQuiz: () => void;
-  onToast: (message: string) => void;
-  onAddNote: () => void;
+const STUDY_GUIDE_PROMPT = "Turn these sources into a clear study guide with key terms, evidence, and questions.";
+
+function outputIcon(kind: StudioOutput["kind"]) {
+  if (kind === "note") return <Clipboard size={14} />;
+  const item = studioItems.find((i) => i.kind === kind);
+  return item?.icon ?? <Sparkles size={14} />;
 }
 
-function GenerateModal({ title, onClose, onGenerate }: { title: string; onClose: () => void; onGenerate: () => void }) {
-  const [generating, setGenerating] = useState(false);
+function relativeTime(timestamp: number) {
+  const minutes = Math.floor((Date.now() - timestamp) / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days}d ago`;
+  return new Date(timestamp).toLocaleDateString();
+}
+
+interface StudioRailProps {
+  onToggle: () => void;
+  onUsePrompt: (text: string) => void;
+  onToast?: (message: string) => void;
+  selectedSourceCount: number;
+  notebookId: string;
+  sources: any[];
+}
+
+function OutputViewer({ job, onClose }: { job: GenerationJob; onClose: () => void }) {
+  const [revealed, setRevealed] = useState<Set<number>>(new Set());
+  const content = (job.output?.content ?? {}) as any;
+  const title = job.output?.title ?? `${job.type.charAt(0).toUpperCase() + job.type.slice(1)}`;
+
+  const toggle = (i: number) =>
+    setRevealed((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+
   return (
     <ModalShell title={title} onClose={onClose}>
-      <div className="mx-auto max-w-[480px] text-center">
-        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-[#303850] text-[#9fbaff]">
-          <Sparkles size={26} />
-        </div>
-        <h3 className="mt-5 font-display text-[22px] tracking-[-0.03em] text-[#f0f2f6]">Generate {title.toLowerCase()}</h3>
-        <p className="mx-auto mt-2 max-w-[360px] text-sm leading-6 text-[#9ba2ae]">This will create a {title.toLowerCase()} from your selected sources. You can refine the output once it&apos;s ready.</p>
-        <div className="mt-7 flex items-center justify-end gap-3">
+      <div className="mx-auto max-w-[560px] space-y-4 text-[14px] leading-6 text-[#ccd1da]">
+        {job.type === 'quiz' && Array.isArray(content.questions) && content.questions.map((q: any, i: number) => (
+          <div key={i} className="rounded-xl border border-[#3b3f48] bg-[#25282d] p-4">
+            <p className="font-medium text-[#eef0f4]">{i + 1}. {q.question}</p>
+            <div className="mt-2 space-y-1.5">
+              {(q.options ?? []).map((opt: string, j: number) => (
+                <p key={j} className={`rounded-lg px-3 py-1.5 text-[13px] ${revealed.has(i) && j === q.correctIndex ? "bg-[#274239] text-[#d6eee4]" : "bg-[#1e2024] text-[#c8ccd4]"}`}>
+                  {String.fromCharCode(65 + j)}. {opt}
+                </p>
+              ))}
+            </div>
+            <button onClick={() => toggle(i)} className="mt-2 text-[12px] text-[#9ebaff] underline hover:text-white">
+              {revealed.has(i) ? "Hide answer" : "Show answer"}
+            </button>
+            {revealed.has(i) && q.explanation && <p className="mt-1 text-[12px] text-[#9ba2ae]">{q.explanation}</p>}
+          </div>
+        ))}
+        {job.type === 'flashcards' && Array.isArray(content.cards) && content.cards.map((c: any, i: number) => (
+          <div key={i} className="rounded-xl border border-[#3b3f48] bg-[#25282d] p-4">
+            <p className="font-medium text-[#eef0f4]">{c.front}</p>
+            <p className="mt-2 border-t border-[#30343b] pt-2 text-[13px]">{c.back}</p>
+          </div>
+        ))}
+        {job.type === 'summary' && (
+          <div className="rounded-xl border border-[#3b3f48] bg-[#25282d] p-4">
+            <p>{content.summary}</p>
+            {Array.isArray(content.keyPoints) && content.keyPoints.length > 0 && (
+              <ul className="mt-3 list-disc space-y-1 pl-5 text-[13px]">
+                {content.keyPoints.map((k: string, i: number) => <li key={i}>{k}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+        {job.type === 'report' && Array.isArray(content.sections) && content.sections.map((s: any, i: number) => (
+          <div key={i} className="rounded-xl border border-[#3b3f48] bg-[#25282d] p-4">
+            <p className="font-display text-[16px] text-[#f0f2f6]">{s.heading}</p>
+            <p className="mt-1.5 text-[13px]">{s.content}</p>
+          </div>
+        ))}
+        {job.type === 'mindmap' && content.root && <MindmapNode node={content.root} depth={0} />}
+      </div>
+    </ModalShell>
+  );
+}
+
+function MindmapNode({ node, depth }: { node: any; depth: number }) {
+  return (
+    <div className={depth > 0 ? "ml-4 border-l border-[#3b3f48] pl-3" : ""}>
+      <p className={`${depth === 0 ? "font-display text-[18px] text-[#f0f2f6]" : "text-[13px] text-[#e4e7ec]"}`}>{node.label}</p>
+      <div className="mt-1.5 space-y-1.5">
+        {(node.children ?? []).map((c: any) => <MindmapNode key={c.id} node={c} depth={depth + 1} />)}
+      </div>
+    </div>
+  );
+}
+
+function NoteModal({ onClose, onSave }: { onClose: () => void; onSave: (text: string) => void }) {
+  const [text, setText] = useState("");
+  return (
+    <ModalShell title="Add note" onClose={onClose}>
+      <div className="mx-auto max-w-[520px]">
+        <h3 className="font-display text-[22px] tracking-[-0.03em] text-[#f0f2f6]">Capture a thought</h3>
+        <p className="mt-2 text-sm leading-6 text-[#9ba2ae]">Notes are saved to this notebook&apos;s Studio panel.</p>
+        <textarea
+          autoFocus
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          rows={6}
+          placeholder="e.g. The authors disagree on the definition of evidence — compare their methods in the report."
+          className="mt-5 w-full resize-none rounded-xl border border-[#4b515c] bg-[#15171a] px-4 py-3 text-sm leading-6 text-[#eef0f4] outline-none transition placeholder:text-[#7e8794] focus:border-[#6b8eef] focus:ring-2 focus:ring-[#5f75b1]/40"
+        />
+        <div className="mt-6 flex items-center justify-end gap-3">
           <button onClick={onClose} className="rounded-full px-4 py-2.5 text-[13px] font-medium text-[#b4bbc7] transition hover:bg-[#2c3037] hover:text-white">Cancel</button>
           <button
-            disabled={generating}
-            onClick={() => { setGenerating(true); setTimeout(() => { setGenerating(false); onGenerate(); onClose(); }, 1200); }}
+            disabled={!text.trim()}
+            onClick={() => { onSave(text.trim()); onClose(); }}
             className="inline-flex items-center gap-2 rounded-full bg-[#6f8ff0] px-5 py-2.5 text-[13px] font-semibold text-[#141b2d] transition hover:bg-[#92abff] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {generating ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
-            Generate
+            <Clipboard size={15} /> Save note
           </button>
         </div>
       </div>
@@ -48,15 +161,249 @@ function GenerateModal({ title, onClose, onGenerate }: { title: string; onClose:
   );
 }
 
-export function StudioRail({ onQuiz, onToast, onAddNote }: StudioRailProps) {
-  const [activeModal, setActiveModal] = useState<string | null>(null);
+function GenerationConfigModal({ 
+  kind, 
+  title, 
+  sourceCount, 
+  onClose, 
+  onGenerate,
+  notebookId,
+}: { 
+  kind: StudioKind; 
+  title: string; 
+  sourceCount: number; 
+  onClose: () => void; 
+  onGenerate: (config: any) => void;
+  notebookId: string;
+}) {
+  const [generating, setGenerating] = useState(false);
+  const [polling, setPolling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [config, setConfig] = useState<any>({});
+  const hasSources = sourceCount > 0;
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const configFields: { key: string; label: string; options?: string[]; default: string }[] = 
+    kind === 'quiz' ? [
+      { key: 'questionCount', label: 'Number of questions', options: ['5', '10', '20', '50'], default: '10' },
+      { key: 'difficulty', label: 'Difficulty', options: ['easy', 'medium', 'hard'], default: 'medium' },
+      { key: 'topic', label: 'Topic (optional)', default: '' },
+    ] :
+    kind === 'flashcards' ? [
+      { key: 'count', label: 'Number of cards', options: ['10', '20', '50', '100'], default: '20' },
+      { key: 'topic', label: 'Topic (optional)', default: '' },
+    ] :
+    kind === 'summary' ? [
+      { key: 'length', label: 'Length', options: ['short', 'medium', 'long'], default: 'medium' },
+      { key: 'topic', label: 'Focus (optional)', default: '' },
+    ] :
+    kind === 'report' ? [
+      { key: 'length', label: 'Length', options: ['short', 'medium', 'long'], default: 'medium' },
+      { key: 'focus', label: 'Focus area (optional)', default: '' },
+    ] :
+    kind === 'mindmap' ? [
+      { key: 'maxNodes', label: 'Max nodes', options: ['20', '50', '100', '200'], default: '50' },
+      { key: 'depth', label: 'Depth', options: ['1', '2', '3', '4', '5'], default: '3' },
+      { key: 'topic', label: 'Focus (optional)', default: '' },
+    ] : [
+      { key: 'topic', label: 'Topic (optional)', default: '' },
+    ];
+
+  useEffect(() => {
+    setConfig(Object.fromEntries(configFields.map((f) => [f.key, f.default])));
+  }, [kind]);
+
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    };
+  }, []);
+
+  const handleGenerate = async () => {
+    if (generating || polling || !hasSources) return;
+    setGenerating(true);
+    setError(null);
+
+    try {
+      const res = await createGeneration(notebookId, {
+        type: kind,
+        config: Object.fromEntries(
+          Object.entries(config).filter(([, v]) => v !== '')
+        ),
+      });
+
+      setGenerating(false);
+      setPolling(true);
+      pollJob(res.jobId);
+    } catch (e: any) {
+      setGenerating(false);
+      setError(e?.message || `Failed to start ${title.toLowerCase()} generation`);
+    }
+  };
+
+  const pollJob = (jobId: string) => {
+    let attempts = 0;
+    const maxAttempts = 60;
+
+    const interval = setInterval(async () => {
+      if (attempts >= maxAttempts) {
+        clearInterval(interval);
+        setPolling(false);
+        setError('Generation timed out');
+        return;
+      }
+      attempts++;
+
+      try {
+        const job = await getGeneration(notebookId, jobId);
+        if (job.status === 'completed') {
+          clearInterval(interval);
+          setPolling(false);
+          onGenerate({});
+          onClose();
+        } else if (job.status === 'failed' || job.status === 'cancelled') {
+          clearInterval(interval);
+          setPolling(false);
+          setError(job.error || `Generation ${job.status}`);
+        }
+      } catch (e) {
+        console.error('Polling error:', e);
+      }
+    }, 5000);
+
+    pollIntervalRef.current = interval;
+  };
+
+  return (
+    <ModalShell title={title} onClose={onClose}>
+      <div className="mx-auto max-w-[480px] text-center">
+        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-[#303850] text-[#9fbaff]">
+          <Sparkles size={26} />
+        </div>
+        <h3 className="mt-5 font-display text-[22px] tracking-[-0.03em] text-[#f0f2f6]">Generate {title.toLowerCase()}</h3>
+        <p className="mx-auto mt-2 max-w-[360px] text-sm leading-6 text-[#9ba2ae]">
+          {hasSources
+            ? <>This will create a {title.toLowerCase()} from your {sourceCount} selected {sourceCount === 1 ? "source" : "sources"}. You can refine the output once it&apos;s ready.</>
+            : "Select at least one source in the Sources panel first, then generate from those."}
+        </p>
+
+        {configFields.map((field) => (
+          <div key={field.key} className="mt-4 text-left">
+            <label className="mb-2 block text-[13px] font-semibold text-[#d7dae1]">{field.label}</label>
+            {field.options ? (
+              <div className="flex overflow-hidden rounded-full border border-[#4c515c] bg-[#24272c]">
+                {field.options.map((option) => (
+                  <button
+                    key={option}
+                    onClick={() => setConfig((prev: any) => ({ ...prev, [field.key]: option }))}
+                    className={`flex-1 whitespace-nowrap px-2.5 py-2.5 text-[12px] transition ${config[field.key] === option ? "bg-[#3b404b] text-[#f0f2f6]" : "text-[#aeb5c0] hover:bg-[#2d3138]"}`}
+                  >
+                    {config[field.key] === option && <Check size={12} className="mr-1 inline" />}{option}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <input
+                value={config[field.key] || ''}
+                onChange={(e) => setConfig((prev: any) => ({ ...prev, [field.key]: e.target.value }))}
+                placeholder={field.label}
+                className="w-full rounded-xl border border-[#4b515c] bg-[#15171a] px-4 py-3 text-sm text-[#eef0f4] outline-none transition placeholder:text-[#7e8794] focus:border-[#6b8eef] focus:ring-2 focus:ring-[#5f75b1]/40"
+              />
+            )}
+          </div>
+        ))}
+
+        {error && (
+          <div className="mt-4 rounded-xl border border-[#c05a5a] bg-[#2d2426] p-3 text-sm text-[#f0d0d0] flex items-center gap-2">
+            <AlertCircle size={14} className="mt-0.5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div className="mt-7 flex items-center justify-end gap-3">
+          <button onClick={onClose} disabled={generating || polling} className="rounded-full px-4 py-2.5 text-[13px] font-medium text-[#b4bbc7] transition hover:bg-[#2c3037] hover:text-white disabled:opacity-50">Cancel</button>
+          <button
+            disabled={generating || polling || !hasSources}
+            onClick={handleGenerate}
+            className="inline-flex items-center gap-2 rounded-full bg-[#6f8ff0] px-5 py-2.5 text-[13px] font-semibold text-[#141b2d] transition hover:bg-[#92abff] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {generating ? <Loader2 size={15} className="animate-spin" /> : polling ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+            {generating ? "Starting…" : polling ? "Generating…" : "Generate"}
+          </button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+export function StudioRail({ onToggle, onUsePrompt, onToast, selectedSourceCount, notebookId, sources }: StudioRailProps) {
+  const [activeModal, setActiveModal] = useState<StudioKind | null>(null);
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [quizOpen, setQuizOpen] = useState(false);
+  const [serverJobs, setServerJobs] = useState<GenerationJob[]>([]);
+  const [serverNotes, setServerNotes] = useState<Note[]>([]);
+  const [viewing, setViewing] = useState<GenerationJob | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [jobs, notes] = await Promise.all([getGenerations(notebookId), getNotes(notebookId)]);
+        if (cancelled) return;
+        setServerJobs(jobs);
+        setServerNotes(notes);
+      } catch {
+        if (!cancelled) {
+          setServerJobs([]);
+          setServerNotes([]);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [notebookId]);
+
+  const refreshServerJobs = async () => {
+    try {
+      setServerJobs(await getGenerations(notebookId));
+    } catch {
+      // keep last-known list on failure; never wipe good state
+    }
+  };
+
+  const refreshServerNotes = async () => {
+    try {
+      setServerNotes(await getNotes(notebookId));
+    } catch {
+      // keep last-known list on failure; never wipe good state
+    }
+  };
+
+  const handleSaveNote = async (text: string) => {
+    try {
+      await createNote(notebookId, { body: text });
+      await refreshServerNotes();
+      onToast?.("Note saved to Studio");
+    } catch (e: any) {
+      onToast?.(e?.message || "Failed to save note");
+    }
+  };
+
+  const handleDeleteNote = async (noteId: string) => {
+    try {
+      await deleteNote(notebookId, noteId);
+      setServerNotes((prev) => prev.filter((n) => n.id !== noteId));
+      onToast?.("Note deleted");
+    } catch (e: any) {
+      onToast?.(e?.message || "Failed to delete note");
+    }
+  };
 
   const handleItemClick = (item: typeof studioItems[0]) => {
     if (item.kind === "quiz") {
-      onQuiz();
+      setQuizOpen(true);
       return;
     }
-    setActiveModal(item.title);
+    setActiveModal(item.kind);
   };
 
   return (
@@ -64,44 +411,132 @@ export function StudioRail({ onQuiz, onToast, onAddNote }: StudioRailProps) {
       <aside className="flex min-h-0 w-full flex-col border-t border-[#30343b] bg-[#1e2024] xl:w-[318px] xl:border-l xl:border-t-0">
         <div className="flex items-center justify-between border-b border-[#30343b] px-4 py-3.5">
           <h2 className="font-display text-[16px] text-[#e8ebf0]">Studio</h2>
-          <button onClick={() => onToast("Studio panel expanded")} className="text-[#aeb4bf] transition hover:text-white"><PanelLeft size={17} /></button>
+          <button onClick={onToggle} aria-expanded="true" aria-label="Hide Studio panel" title="Hide Studio panel" className="text-[#aeb4bf] transition hover:text-white"><PanelRight size={17} /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          <button onClick={() => onToast("Describe the output you want")} className="mb-4 flex w-full items-start gap-3 rounded-2xl border border-[#355c51] bg-[#274239] p-3 text-left text-[12px] leading-5 text-[#d6eee4] transition hover:border-[#5a907f]">
+          <button onClick={() => onUsePrompt(STUDY_GUIDE_PROMPT)} title="Use this prompt in chat" className="mb-4 flex w-full items-start gap-3 rounded-2xl border border-[#355c51] bg-[#274239] p-3 text-left text-[12px] leading-5 text-[#d6eee4] transition hover:border-[#5a907f]">
             <Sparkles size={16} className="mt-0.5 shrink-0 text-[#a9e2c9]" />
-            <span>Turn these sources into a clear study guide with key terms, evidence, and questions.</span>
+            <span>
+              {STUDY_GUIDE_PROMPT}
+              <span className="mt-1.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[#a9e2c9]">Use in chat <ChevronRight size={11} /></span>
+            </span>
           </button>
           <div className="grid grid-cols-2 gap-2">
-            {studioItems.map((item) => (
-              <button key={item.kind} onClick={() => handleItemClick(item)} className={`group min-h-[74px] rounded-xl border border-white/[0.04] ${item.tint} p-3 text-left transition hover:-translate-y-0.5 hover:border-white/20 hover:brightness-110 active:scale-[0.98]`}>
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-[#d8deea]">{item.icon}</span>
-                  {item.beta && <span className="rounded bg-[#1d2024]/75 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[#eef1f5]">Beta</span>}
-                  <ChevronRight size={14} className="ml-auto text-[#a9afb9] transition group-hover:translate-x-0.5" />
-                </div>
-                <p className="mt-2 text-[12px] font-medium text-[#e4e7ec]">{item.title}</p>
-              </button>
-            ))}
+            {studioItems.map((item) => {
+              const supported = SUPPORTED_KINDS.has(item.kind);
+              return (
+                <button
+                  key={item.kind}
+                  onClick={() => handleItemClick(item)}
+                  disabled={!supported}
+                  title={supported ? item.description : `${item.title} is coming soon`}
+                  aria-disabled={!supported}
+                  className={`group min-h-[74px] rounded-xl border border-white/[0.04] ${item.tint} p-3 text-left transition active:scale-[0.98] ${supported ? "hover:-translate-y-0.5 hover:border-white/20 hover:brightness-110" : "cursor-not-allowed opacity-50"}`}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[#d8deea]">{item.icon}</span>
+                    {!supported
+                      ? <span className="rounded bg-[#1d2024]/75 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[#eef1f5]">Soon</span>
+                      : item.beta && <span className="rounded bg-[#1d2024]/75 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[#eef1f5]">Beta</span>}
+                    {supported && <ChevronRight size={14} className="ml-auto text-[#a9afb9] transition group-hover:translate-x-0.5" />}
+                  </div>
+                  <p className="mt-2 text-[12px] font-medium text-[#e4e7ec]">{item.title}</p>
+                </button>
+              );
+            })}
           </div>
-          <div className="mt-5 border-t border-[#30343b] pt-6 text-center">
-            <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-[#2d3652] text-[#91adff]">
-              <Sparkles size={21} />
+          <div className="mt-5 border-t border-[#30343b] pt-6">
+            {serverJobs.length > 0 && (
+              <div className="mb-5 space-y-2">
+                <p className="px-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#858c98]">Generated</p>
+                {serverJobs.map((job) => (
+                  <button
+                    key={job.id}
+                    onClick={() => { if (job.status === 'completed' && job.output) setViewing(job); }}
+                    disabled={job.status !== 'completed' || !job.output}
+                    className="flex w-full items-start gap-2.5 rounded-xl border border-white/[0.05] bg-[#26292f] p-3 text-left transition hover:border-white/20 disabled:cursor-default"
+                  >
+                    <span className="mt-0.5 shrink-0 text-[#9ebaff]">{outputIcon((job.output?.type ?? job.type) as StudioOutput["kind"])}</span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[12px] font-medium text-[#e4e7ec]">{job.output?.title ?? `${job.type.charAt(0).toUpperCase() + job.type.slice(1)}`}</p>
+                      <p className="mt-1 text-[10px] text-[#707783]">
+                        {job.status === 'completed' ? `Ready · ${relativeTime(new Date(job.updatedAt).getTime())}` : job.status === 'failed' ? `Failed${job.error ? ` · ${job.error}` : ''}` : `${job.status} · ${job.progress}%`}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            {serverJobs.length === 0 && serverNotes.length === 0 ? (
+              <div className="text-center">
+                <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-[#2d3652] text-[#91adff]">
+                  <Sparkles size={21} />
+                </div>
+                <p className="mt-4 font-display text-[15px] text-[#a9b0bc]">Your study outputs will be saved here.</p>
+                <p className="mt-1 px-6 text-[12px] leading-5 text-[#7e8693]">Generate a quiz, flashcards, or report to start building your study kit.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <p className="px-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#858c98]">Notes</p>
+                {serverNotes.map((note) => (
+                  <div key={note.id} className="flex items-start gap-2.5 rounded-xl border border-white/[0.05] bg-[#26292f] p-3">
+                    <span className="mt-0.5 shrink-0 text-[#9ebaff]"><Clipboard size={14} /></span>
+                    <div className="min-w-0 flex-1">
+                      <p className="line-clamp-2 text-[12px] leading-4 text-[#e4e7ec]">{note.body}</p>
+                      <p className="mt-1 text-[10px] text-[#707783]">Note · {relativeTime(new Date(note.createdAt).getTime())}</p>
+                    </div>
+                    <button onClick={() => handleDeleteNote(note.id)} aria-label="Delete note" title="Delete note" className="rounded-full p-1 text-[#7e8693] transition hover:bg-[#2c3037] hover:text-white">
+                      <X size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="mt-5 text-center">
+              <button onClick={() => setNoteOpen(true)} className="inline-flex items-center gap-2 rounded-full bg-[#eef0f4] px-4 py-2.5 text-[13px] font-medium text-[#282a30] transition hover:bg-white active:scale-[0.98]">
+                <Clipboard size={15} /> Add note
+              </button>
             </div>
-            <p className="mt-4 font-display text-[15px] text-[#a9b0bc]">Your study outputs will be saved here.</p>
-            <p className="mt-1 px-6 text-[12px] leading-5 text-[#7e8693]">Generate an audio brief, quiz, or report to start building your study kit.</p>
-            <button onClick={onAddNote} className="mt-5 inline-flex items-center gap-2 rounded-full bg-[#eef0f4] px-4 py-2.5 text-[13px] font-medium text-[#282a30] transition hover:bg-white active:scale-[0.98]">
-              <Clipboard size={15} /> Add note
-            </button>
           </div>
         </div>
       </aside>
 
       {activeModal && (
-        <GenerateModal
-          title={activeModal}
+        <GenerationConfigModal
+          kind={activeModal}
+          title={studioItems.find(i => i.kind === activeModal)?.title || activeModal}
+          sourceCount={selectedSourceCount}
           onClose={() => setActiveModal(null)}
-          onGenerate={() => onToast(`${activeModal} generated`)}
+          onGenerate={() => {
+            void refreshServerJobs();
+            onToast?.("Output generated — see Generated above");
+          }}
+          notebookId={notebookId}
         />
+      )}
+      {quizOpen && (
+        <QuizModal
+          notebookId={notebookId}
+          selectedSources={sources.filter((s) => s.selected)}
+          onClose={() => setQuizOpen(false)}
+          onGenerated={() => {
+            setQuizOpen(false);
+            void refreshServerJobs();
+            onToast?.("Quiz generated — see Generated above");
+          }}
+        />
+      )}
+      {noteOpen && (
+        <NoteModal
+          onClose={() => setNoteOpen(false)}
+          onSave={(text) => {
+            setNoteOpen(false);
+            void handleSaveNote(text);
+          }}
+        />
+      )}
+      {viewing && (
+        <OutputViewer job={viewing} onClose={() => setViewing(null)} />
       )}
     </>
   );

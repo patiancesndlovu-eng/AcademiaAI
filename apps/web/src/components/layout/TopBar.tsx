@@ -1,20 +1,38 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { UserButton } from "@clerk/clerk-react";
-import { MoreVertical, Grid2X2, Plus, Copy, BarChart3, Share2, Settings, HelpCircle, Zap, Globe2, Check } from "lucide-react";
+import { MoreVertical, Grid2X2, LayoutGrid, Plus, Copy, BarChart3, Share2, Settings, HelpCircle, Zap, Globe2, Check } from "lucide-react";
 import { IconButton, PillButton, AcademiaMark, BellIcon, MARK_URL } from "@/components/common/Primitives";
+import { Popover, PopoverItem } from "@/components/common/Popover";
+import { InsightsModal, ShareModal, SettingsModal, HelpModal, ShortcutsModal } from "@/components/layout/TopBarDialogs";
+
+type Dialog = "insights" | "share" | "settings" | "help" | "shortcuts" | null;
+
+const LANGUAGES = ["English", "Español", "Português"];
+const LANGUAGE_STORAGE_KEY = "academiaai:output-language";
 
 interface TopBarProps {
   mode: "dashboard" | "notebook";
   notebookTitle?: string;
   onCreate: () => void;
   onToast: (message: string) => void;
+  notebook?: any;
+  sources?: any[];
+  onNotebookUpdated?: (notebook: any) => void;
+  onNotebookDeleted?: () => void;
 }
 
-export function TopBar({ mode, notebookTitle, onCreate, onToast }: TopBarProps) {
+export function TopBar({ mode, notebookTitle, onCreate, onToast, notebook, sources = [], onNotebookUpdated, onNotebookDeleted }: TopBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [appMenuOpen, setAppMenuOpen] = useState(false);
+  const [langOpen, setLangOpen] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [dialog, setDialog] = useState<Dialog>(null);
   const [copied, setCopied] = useState(false);
+  const [language, setLanguage] = useState<string>(() => localStorage.getItem(LANGUAGE_STORAGE_KEY) || "English");
   const navigate = useNavigate();
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const appMenuRef = useRef<HTMLButtonElement>(null);
 
   const handleCopy = async () => {
     try {
@@ -25,6 +43,12 @@ export function TopBar({ mode, notebookTitle, onCreate, onToast }: TopBarProps) 
     } catch {
       onToast("Failed to copy link");
     }
+  };
+
+  const chooseLanguage = (lang: string) => {
+    setLanguage(lang);
+    localStorage.setItem(LANGUAGE_STORAGE_KEY, lang);
+    setLangOpen(false);
   };
 
   return (
@@ -47,28 +71,46 @@ export function TopBar({ mode, notebookTitle, onCreate, onToast }: TopBarProps) 
         <div className="hidden items-center gap-2 xl:flex">
           <PillButton filled onClick={onCreate}><Plus size={15} /> Create notebook</PillButton>
           <PillButton onClick={handleCopy}>{copied ? <Check size={15} /> : <Copy size={15} />} {copied ? "Copied" : "Copy"}</PillButton>
-          <PillButton onClick={() => onToast("Insights are being prepared for this notebook")}><BarChart3 size={15} /> Insights</PillButton>
-          <PillButton onClick={() => onToast("Share settings opened")}><Share2 size={15} /> Share</PillButton>
-          <PillButton onClick={() => onToast("Notebook settings opened")}><Settings size={15} /> Settings</PillButton>
+          <PillButton onClick={() => setDialog("insights")}><BarChart3 size={15} /> Insights</PillButton>
+          <PillButton onClick={() => setDialog("share")}><Share2 size={15} /> Share</PillButton>
+          <PillButton onClick={() => setDialog("settings")}><Settings size={15} /> Settings</PillButton>
         </div>
       )}
       <div className="flex items-center gap-1.5 sm:gap-2">
         {mode === "dashboard" && <PillButton filled onClick={onCreate}><Plus size={15} /> <span className="hidden sm:inline">Create notebook</span></PillButton>}
         <div className="relative">
-          <IconButton label="More options" active={menuOpen} onClick={() => setMenuOpen((v) => !v)}><MoreVertical size={19} /></IconButton>
-          {menuOpen && (
-            <div className="absolute right-0 top-11 z-40 w-52 overflow-hidden rounded-2xl border border-[#3a3f49] bg-[#292c32] p-1.5 shadow-[0_18px_45px_rgba(0,0,0,.4)] animate-pop-in">
-              {["AcademiaAi help", "Keyboard shortcuts", "Output language", "Notifications"].map((item, index) => (
-                <button key={item} onClick={() => { setMenuOpen(false); onToast(`${item} opened`); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[13px] text-[#d6d9df] transition hover:bg-[#373b44]">
-                  {index === 0 ? <HelpCircle size={16} /> : index === 1 ? <Zap size={16} /> : index === 2 ? <Globe2 size={16} /> : <BellIcon />}
-                  <span>{item}</span>
-                </button>
-              ))}
-            </div>
-          )}
+          <IconButton ref={moreRef} label="More options" active={menuOpen} onClick={() => setMenuOpen((v) => !v)}><MoreVertical size={19} /></IconButton>
+          <Popover open={menuOpen} onClose={() => setMenuOpen(false)} anchorRef={moreRef} align="right" className="w-56">
+            {mode === "notebook" && notebook && (
+              <>
+                <PopoverItem icon={<BarChart3 size={16} />} onClick={() => { setMenuOpen(false); setDialog("insights"); }}>Insights</PopoverItem>
+                <PopoverItem icon={<Share2 size={16} />} onClick={() => { setMenuOpen(false); setDialog("share"); }}>Share</PopoverItem>
+                <PopoverItem icon={<Settings size={16} />} onClick={() => { setMenuOpen(false); setDialog("settings"); }}>Settings</PopoverItem>
+              </>
+            )}
+            <PopoverItem icon={<HelpCircle size={16} />} onClick={() => { setMenuOpen(false); setDialog("help"); }}>AcademiaAi help</PopoverItem>
+            <PopoverItem icon={<Zap size={16} />} onClick={() => { setMenuOpen(false); setDialog("shortcuts"); }}>Keyboard shortcuts</PopoverItem>
+            <PopoverItem icon={<Globe2 size={16} />} onClick={() => { setMenuOpen(false); setLangOpen(true); }}>Output language — {language}</PopoverItem>
+            <PopoverItem icon={<BellIcon />} onClick={() => { setMenuOpen(false); setNotifOpen(true); }}>Notifications</PopoverItem>
+          </Popover>
+          <Popover open={langOpen} onClose={() => setLangOpen(false)} anchorRef={moreRef} align="right" className="w-48">
+            <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-[#858c98]">Output language</div>
+            {LANGUAGES.map((lang) => (
+              <PopoverItem key={lang} active={language === lang} onClick={() => chooseLanguage(lang)}>{lang}</PopoverItem>
+            ))}
+          </Popover>
+          <Popover open={notifOpen} onClose={() => setNotifOpen(false)} anchorRef={moreRef} align="right" className="w-60">
+            <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-[#858c98]">Notifications</div>
+            <p className="px-3 pb-2 pt-1 text-[12px] leading-5 text-[#9ba2ae]">You&apos;re all caught up. Activity on your notebooks will appear here.</p>
+          </Popover>
         </div>
-        {/* App menu: just a toast for now. If you want a global nav drawer later, wire it here. */}
-        <IconButton label="App menu" onClick={() => onToast("App menu opened")}><Grid2X2 size={19} /></IconButton>
+        <div className="relative">
+          <IconButton ref={appMenuRef} label="App menu" active={appMenuOpen} onClick={() => setAppMenuOpen((v) => !v)}><Grid2X2 size={19} /></IconButton>
+          <Popover open={appMenuOpen} onClose={() => setAppMenuOpen(false)} anchorRef={appMenuRef} align="right" className="w-48">
+            <PopoverItem icon={<LayoutGrid size={16} />} onClick={() => { setAppMenuOpen(false); navigate("/"); }}>Dashboard</PopoverItem>
+            <PopoverItem icon={<Plus size={16} />} onClick={() => { setAppMenuOpen(false); onCreate(); }}>New notebook</PopoverItem>
+          </Popover>
+        </div>
         <UserButton
           afterSignOutUrl="/sign-in"
           appearance={{
@@ -82,6 +124,18 @@ export function TopBar({ mode, notebookTitle, onCreate, onToast }: TopBarProps) 
           }}
         />
       </div>
+
+      {dialog === "insights" && notebook && (
+        <InsightsModal notebook={notebook} sources={sources} onClose={() => setDialog(null)} />
+      )}
+      {dialog === "share" && notebook && onNotebookUpdated && (
+        <ShareModal notebook={notebook} onClose={() => setDialog(null)} onToast={onToast} onNotebookUpdated={onNotebookUpdated} />
+      )}
+      {dialog === "settings" && notebook && onNotebookUpdated && onNotebookDeleted && (
+        <SettingsModal notebook={notebook} onClose={() => setDialog(null)} onToast={onToast} onNotebookUpdated={onNotebookUpdated} onNotebookDeleted={onNotebookDeleted} />
+      )}
+      {dialog === "help" && <HelpModal onClose={() => setDialog(null)} />}
+      {dialog === "shortcuts" && <ShortcutsModal onClose={() => setDialog(null)} />}
     </header>
   );
 }

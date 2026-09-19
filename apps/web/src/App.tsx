@@ -2,14 +2,25 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAuth } from "@clerk/clerk-react";
 import { Loader2 } from "lucide-react";
+import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
+import { setClerkTokenGetter } from "./lib/api";
 import { AuthPage } from "./pages/AuthPage";
 import Dashboard from "./pages/Dashboard";
 import NotFound from "./pages/NotFound";
 import NotebookWorkspace from "./pages/NotebookWorkspace";
 import SSOCallback from "./pages/SSOCallback";
+
+/** Feeds the Clerk session token to the API layer (no window-global sniffing). */
+function ClerkTokenBridge() {
+  const { getToken } = useAuth();
+  useEffect(() => {
+    setClerkTokenGetter(() => getToken());
+  }, [getToken]);
+  return null;
+}
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isLoaded, isSignedIn } = useAuth();
@@ -34,6 +45,7 @@ function App() {
     <ErrorBoundary>
       <ThemeProvider defaultTheme="dark">
         <TooltipProvider>
+          <ClerkTokenBridge />
           <Toaster />
           <Routes>
             <Route path="/sign-in" element={<AuthPage mode="sign-in" />} />

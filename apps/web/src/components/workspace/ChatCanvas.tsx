@@ -1,11 +1,19 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ArrowRight, SlidersHorizontal, MoreVertical, BrainCircuit, Sparkles, Trash2, Download, MessageSquarePlus } from "lucide-react";
+import { ArrowRight, SlidersHorizontal, MoreVertical, BrainCircuit, Sparkles, Trash2, Download, MessageSquarePlus, Globe2, Loader2 } from "lucide-react";
 import { IconButton } from "@/components/common/Primitives";
+import { Popover, PopoverItem } from "@/components/common/Popover";
+import { streamChat, clearChatMessages, type ChatMessage as APIChatMessage, getChatMessages } from "@/lib/api";
 
 interface ChatCanvasProps {
   notebook: any;
   sources: any[];
-  onToast: (message: string) => void;
+  promptSeed?: { text: string; id: number } | null;
+  onToast?: (message: string) => void;
+}
+
+interface ChatMessage extends APIChatMessage {
+  streaming?: boolean;
+  error?: { code: string; message: string; retryable: boolean };
 }
 
 function formatDate(dateStr: string) {
@@ -13,109 +21,362 @@ function formatDate(dateStr: string) {
   return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-export function ChatCanvas({ notebook, sources, onToast }: ChatCanvasProps) {
+function createUserMessage(content: string): ChatMessage {
+  return { id: `temp-u-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, role: 'user', content, streaming: false, createdAt: new Date().toISOString() };
+}
+
+function createAssistantMessage(content: string, streaming = true): ChatMessage {
+  return { id: `temp-a-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, role: 'assistant', content, streaming, createdAt: new Date().toISOString() };
+}
+
+function createErrorMessage(error: { code: string; message: string; retryable: boolean }): ChatMessage {
+  return { id: `temp-e-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, role: 'assistant', content: '', streaming: false, error, createdAt: new Date().toISOString() };
+}
+
+export function ChatCanvas({ notebook, sources, promptSeed, onToast }: ChatCanvasProps) {
   const [prompt, setPrompt] = useState("");
-  const [messages, setMessages] = useState<{ role: "user" | "ai"; text: string }[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [style, setStyle] = useState<"concise" | "detailed" | "academic">("concise");
   const [styleOpen, setStyleOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [webEnhanced, setWebEnhanced] = useState(false);
   const [sending, setSending] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [hasMoreHistory, setHasMoreHistory] = useState(true);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const styleRef = useRef<HTMLButtonElement>(null);
+  const optionsRef = useRef<HTMLButtonElement>(null);
+  const settingsRef = useRef<HTMLButtonElement>(null);
+  const inFlightRef = useRef<AbortController | null>(null);
+  const lastAttemptRef = useRef<string | null>(null);
+  const historyReqRef = useRef(0);
+  // Citations arrive as separate SSE events before message.completed; collect per send.
+  const pendingCitationsRef = useRef<{ sourceId: string; quote: string | null; page: number | null }[]>([]);
   const selectedSources = sources.filter((s) => s.selected);
   const sourceCount = selectedSources.length;
 
-  /* Auto-resize textarea */
   const resizeTextarea = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 112) + "px"; /* 112px ≈ 28px * 4 rows max */
+    el.style.height = Math.min(el.scrollHeight, 112) + "px";
   }, []);
 
   useEffect(() => {
     resizeTextarea();
   }, [prompt, resizeTextarea]);
 
-  const sendPrompt = async () => {
-    if (!prompt.trim() || sending) return;
-    const nextPrompt = prompt.trim();
-    setMessages((current) => [...current, { role: "user", text: nextPrompt }]);
+  useEffect(() => {
+    if (!promptSeed) return;
+    setPrompt(promptSeed.text);
+    const el = textareaRef.current;
+    if (el) {
+      el.focus();
+      el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    resizeTextarea();
+  }, [promptSeed?.id]);
+
+  useEffect(() => {
+    setMessages([]);
+    setNextCursor(null);
+    setHasMoreHistory(true);
+    setSending(false);
+    inFlightRef.current?.abort();
+    inFlightRef.current = null;
+    const req = ++historyReqRef.current;
+    let cancelled = false;
+    (async () => {
+      setLoadingHistory(true);
+      try {
+        const result = await getChatMessages(notebook.id, { limit: 50 });
+        if (cancelled || historyReqRef.current !== req) return;
+        // Backend returns newest-first; display oldest-first.
+        setMessages([...result.data].reverse());
+        setNextCursor(result.meta.nextCursor);
+        setHasMoreHistory(result.meta.hasMore);
+      } catch (e: any) {
+        if (!cancelled) console.error('Failed to load chat history:', e);
+      } finally {
+        if (!cancelled && historyReqRef.current === req) setLoadingHistory(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      inFlightRef.current?.abort();
+      inFlightRef.current = null;
+    };
+  }, [notebook.id]);
+
+  async function loadHistory(cursor?: string) {
+    if (loadingHistory || (!cursor && !hasMoreHistory)) return;
+    setLoadingHistory(true);
+    try {
+      const result = await getChatMessages(notebook.id, { limit: 50, cursor });
+      setMessages((prev) => cursor ? [...[...result.data].reverse(), ...prev] : [...result.data].reverse());
+      setNextCursor(result.meta.nextCursor);
+      setHasMoreHistory(result.meta.hasMore);
+    } catch (e: any) {
+      console.error('Failed to load chat history:', e);
+    } finally {
+      setLoadingHistory(false);
+    }
+  }
+
+  async function loadMoreHistory() {
+    if (nextCursor) await loadHistory(nextCursor);
+  }
+
+  const handleSSEEvent = useCallback((event: { event: string; data: any }) => {
+    switch (event.event) {
+      case 'message.started':
+        if (event.data.userMessageId) {
+          const realId = event.data.userMessageId as string;
+          setMessages((prev) => {
+            const idx = prev.map((m) => m.role).lastIndexOf('user');
+            if (idx < 0 || !prev[idx].id.startsWith('temp-')) return prev;
+            const next = [...prev];
+            next[idx] = { ...next[idx], id: realId };
+            return next;
+          });
+        }
+        break;
+      case 'message.delta':
+        if (event.data.text) {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && last.role === 'assistant' && last.streaming) {
+              return [...prev.slice(0, -1), { ...last, content: last.content + event.data.text }];
+            }
+            return [...prev, createAssistantMessage(event.data.text)];
+          });
+        }
+        break;
+      case 'citation':
+        if (event.data?.sourceId) {
+          pendingCitationsRef.current.push({
+            sourceId: event.data.sourceId,
+            quote: event.data.quote ?? null,
+            page: event.data.page ?? null,
+          });
+        }
+        break;
+      case 'message.completed': {
+        const citations = pendingCitationsRef.current;
+        pendingCitationsRef.current = [];
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.role === 'assistant' && last.streaming) {
+            return [...prev.slice(0, -1), { ...last, id: event.data.messageId ?? last.id, streaming: false, citations, modelMeta: event.data.model }];
+          }
+          return [...prev, { ...createAssistantMessage('', false), id: event.data.messageId ?? `temp-a-${Date.now()}`, citations, modelMeta: event.data.model }];
+        });
+        lastAttemptRef.current = null;
+        setSending(false);
+        break;
+      }
+      case 'message.error':
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.role === 'assistant' && last.streaming) {
+            return [...prev.slice(0, -1), createErrorMessage(event.data)];
+          }
+          return [...prev, createErrorMessage(event.data)];
+        });
+        setSending(false);
+        break;
+      case 'message.searching':
+        break;
+    }
+  }, []);
+
+  const sendText = async (text: string) => {
+    if (!text.trim() || sending) return;
+    const nextPrompt = text.trim();
+    inFlightRef.current?.abort();
+    const controller = new AbortController();
+    inFlightRef.current = controller;
+    lastAttemptRef.current = nextPrompt;
+    pendingCitationsRef.current = [];
+    // Instant feedback: user message + streaming placeholder before the first delta.
+    setMessages((current) => [...current, createUserMessage(nextPrompt), createAssistantMessage('', true)]);
     setPrompt("");
     setSending(true);
 
-    /* Simulate AI response — replace with real API call */
-    setTimeout(() => {
-      setMessages((current) => [
-        ...current,
-        { role: "ai", text: `I’ll connect that question to the ${sourceCount} selected sources and keep the reasoning traceable. For now, start by comparing the authors’ definitions, methods, and strongest evidence.` }
-      ]);
+    try {
+      await streamChat(notebook.id, {
+        content: nextPrompt,
+        sourceIds: selectedSources.map(s => s.id),
+        webEnhanced,
+        style,
+      }, handleSSEEvent, controller.signal);
+    } catch (e: any) {
+      if (controller.signal.aborted) {
+        // Aborted by a newer send or unmount; the new attempt owns the UI state.
+        if (inFlightRef.current === controller) setSending(false);
+        return;
+      }
+      const failure = {
+        code: e?.code ?? 'AI_GENERATION_FAILED',
+        message: e?.message || 'Failed to generate response',
+        retryable: e?.retryable ?? true,
+      };
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && last.role === 'assistant' && last.streaming) {
+          return [...prev.slice(0, -1), createErrorMessage(failure)];
+        }
+        return [...prev, createErrorMessage(failure)];
+      });
+      setPrompt((current) => current || nextPrompt);
       setSending(false);
-    }, 800);
+      textareaRef.current?.focus();
+    } finally {
+      if (inFlightRef.current === controller) inFlightRef.current = null;
+    }
   };
 
-  const clearChat = () => {
-    setMessages([]);
+  const sendPrompt = () => {
+    void sendText(prompt);
+  };
+
+  const retryLast = () => {
+    const last = lastAttemptRef.current;
+    if (last) void sendText(last);
+  };
+
+  const clearChat = async () => {
     setOptionsOpen(false);
-    onToast("Chat cleared");
+    if (sending) return;
+    const previous = messages;
+    setMessages([]);
+    try {
+      await clearChatMessages(notebook.id);
+      lastAttemptRef.current = null;
+      onToast?.("Chat cleared");
+    } catch (e: any) {
+      setMessages(previous);
+      onToast?.(e?.message || "Failed to clear chat");
+    }
+  };
+
+  const exportChat = () => {
+    setOptionsOpen(false);
+    const transcript = messages.map((m) => `${m.role === "user" ? "## You" : "## AcademiaAi"}\n\n${m.content}`).join("\n\n");
+    const content = `# ${notebook.title} — chat\n\n${formatDate(notebook.updatedAt)}\n\n${transcript}\n`;
+    const blob = new Blob([content], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `chat-${notebook.id}.md`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const styleIcon = (s: string) => (s === "concise" ? <MessageSquarePlus size={14} /> : s === "detailed" ? <BrainCircuit size={14} /> : <Sparkles size={14} />);
+
+  const renderMessage = (message: ChatMessage) => {
+    if (message.error) {
+      return (
+        <div key={message.id} className="flex justify-start">
+          <div className="flex items-center gap-2 rounded-2xl border border-[#c05a5a] bg-[#2d2426] px-4 py-3 text-[14px] text-[#f0d0d0]">
+            <span>⚠</span>
+            <span>{message.error.message}</span>
+            {message.error.retryable && (
+              <button onClick={retryLast} className="ml-2 min-h-[44px] text-xs underline hover:text-white">Retry</button>
+            )}
+          </div>
+        </div>
+      );
+    }
+    if (message.streaming) {
+      return (
+        <div key={message.id} className="flex justify-start">
+          <div className="max-w-[88%] rounded-2xl border border-[#3b404a] bg-[#282b31] px-4 py-3 text-[14px] leading-6 text-[#ccd1da]">
+            {message.content ? (
+              <span>{message.content}<span className="ml-0.5 inline-block h-4 w-[7px] animate-pulse rounded-[2px] bg-[#7ea7ff] align-middle" /></span>
+            ) : (
+              <span className="flex items-center gap-2">
+                <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "0ms" }} />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "150ms" }} />
+                <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "300ms" }} />
+              </span>
+            )}
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className={`flex gap-3 ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+        <div className={`max-w-[88%] rounded-2xl px-4 py-3 text-[14px] leading-6 ${message.role === "user" ? "bg-[#34446c] text-[#edf2ff]" : "border border-[#3b404a] bg-[#282b31] text-[#ccd1da]"}`}>
+          {message.content}
+          {message.citations && message.citations.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {message.citations.map((c, i) => (
+                <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-[#3b404a] text-[#9ebaff] cursor-help" title={c.quote || `Source: ${c.sourceId}`}>
+                  [{i + 1}]
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
   };
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#202226]">
-      {/* Header */}
       <div className="flex items-center justify-between border-b border-[#30343b] px-5 py-3.5">
         <h2 className="font-display text-[16px] text-[#e8ebf0]">Chat</h2>
         <div className="flex items-center gap-1">
-          {/* Settings dropdown */}
           <div className="relative">
-            <IconButton label="Chat settings" onClick={() => setSettingsOpen((v) => !v)}><SlidersHorizontal size={17} /></IconButton>
-            {settingsOpen && (
-              <div className="absolute right-0 top-10 z-30 w-52 overflow-hidden rounded-2xl border border-[#3a3f49] bg-[#292c32] p-1.5 shadow-[0_18px_45px_rgba(0,0,0,.4)] animate-pop-in">
-                <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-[#858c98]">Response style</div>
-                {(["concise", "detailed", "academic"] as const).map((s) => (
-                  <button key={s} onClick={() => { setStyle(s); setSettingsOpen(false); onToast(`Style set to ${s}`); }} className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] transition hover:bg-[#373b44] ${style === s ? "text-[#9ebaff]" : "text-[#d6d9df]"}`}>
-                    {s === "concise" ? <MessageSquarePlus size={14} /> : s === "detailed" ? <BrainCircuit size={14} /> : <Sparkles size={14} />}
-                    {s.charAt(0).toUpperCase() + s.slice(1)}
-                  </button>
-                ))}
-              </div>
-            )}
+            <IconButton ref={settingsRef} label="Chat settings" active={settingsOpen} onClick={() => setSettingsOpen((v) => !v)}><SlidersHorizontal size={17} /></IconButton>
+            <Popover open={settingsOpen} onClose={() => setSettingsOpen(false)} anchorRef={settingsRef} align="right" className="w-52">
+              <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-[#858c98]">Response style</div>
+              {(["concise", "detailed", "academic"] as const).map((s) => (
+                <PopoverItem key={s} icon={styleIcon(s)} active={style === s} onClick={() => { setStyle(s); setSettingsOpen(false); }}>
+                  {s.charAt(0).toUpperCase() + s.slice(1)}
+                </PopoverItem>
+              ))}
+              <div className="border-t border-[#30343b] my-2" />
+              <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-[#858c98]">Web search</div>
+              <PopoverItem active={webEnhanced} onClick={() => { setWebEnhanced(!webEnhanced); setSettingsOpen(false); }}>
+                <span className="flex items-center gap-2">{webEnhanced && <Globe2 size={14} className="text-[#7ea7ff]" />} Web-enhanced answers</span>
+              </PopoverItem>
+            </Popover>
           </div>
-          {/* Options dropdown */}
           <div className="relative">
-            <IconButton label="Chat options" onClick={() => setOptionsOpen((v) => !v)}><MoreVertical size={18} /></IconButton>
-            {optionsOpen && (
-              <div className="absolute right-0 top-10 z-30 w-44 overflow-hidden rounded-2xl border border-[#3a3f49] bg-[#292c32] p-1.5 shadow-[0_18px_45px_rgba(0,0,0,.4)] animate-pop-in">
-                <button onClick={clearChat} className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] text-[#d6d9df] transition hover:bg-[#373b44]"><Trash2 size={14} /> Clear chat</button>
-                <button onClick={() => { setOptionsOpen(false); onToast("Chat exported"); }} className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] text-[#d6d9df] transition hover:bg-[#373b44]"><Download size={14} /> Export chat</button>
-              </div>
-            )}
+            <IconButton ref={optionsRef} label="Chat options" active={optionsOpen} onClick={() => setOptionsOpen((v) => !v)}><MoreVertical size={18} /></IconButton>
+            <Popover open={optionsOpen} onClose={() => setOptionsOpen(false)} anchorRef={optionsRef} align="right" className="w-44">
+              <PopoverItem icon={<Trash2 size={14} />} disabled={messages.length === 0} onClick={clearChat}>Clear chat</PopoverItem>
+              <PopoverItem icon={<Download size={14} />} disabled={messages.length === 0} onClick={exportChat}>Export chat</PopoverItem>
+            </Popover>
           </div>
         </div>
       </div>
 
-      {/* Messages */}
       <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-6 sm:px-8 lg:px-10">
         <div className="mx-auto max-w-[720px] pt-9">
           <div className="flex items-center justify-between">
             <div className="flex h-10 w-10 items-center justify-center rounded-[13px] bg-[#323a50] text-[#abc2ff]">
               <BrainCircuit size={22} />
             </div>
-            {/* Style selector */}
             <div className="relative">
-              <button onClick={() => setStyleOpen((v) => !v)} className="flex items-center gap-2 rounded-full border border-[#3c414b] px-3.5 py-2 text-xs font-medium text-[#d4d8e1] transition hover:border-[#65708b]">
+              <button ref={styleRef} onClick={() => setStyleOpen((v) => !v)} aria-expanded={styleOpen} className="flex items-center gap-2 rounded-full border border-[#3c414b] px-3.5 py-2 text-xs font-medium text-[#d4d8e1] transition hover:border-[#65708b]">
                 <Sparkles size={14} className="text-[#9cb9ff]" /> {style.charAt(0).toUpperCase() + style.slice(1)}
               </button>
-              {styleOpen && (
-                <div className="absolute right-0 top-10 z-30 w-40 overflow-hidden rounded-2xl border border-[#3a3f49] bg-[#292c32] p-1.5 shadow-[0_18px_45px_rgba(0,0,0,.4)] animate-pop-in">
-                  {(["concise", "detailed", "academic"] as const).map((s) => (
-                    <button key={s} onClick={() => { setStyle(s); setStyleOpen(false); onToast(`Style set to ${s}`); }} className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] transition hover:bg-[#373b44] ${style === s ? "text-[#9ebaff]" : "text-[#d6d9df]"}`}>
-                      {s.charAt(0).toUpperCase() + s.slice(1)}
-                    </button>
-                  ))}
-                </div>
-              )}
+              <Popover open={styleOpen} onClose={() => setStyleOpen(false)} anchorRef={styleRef} align="right" className="w-40">
+                {(["concise", "detailed", "academic"] as const).map((s) => (
+                  <PopoverItem key={s} active={style === s} onClick={() => { setStyle(s); setStyleOpen(false); }}>
+                    {s.charAt(0).toUpperCase() + s.slice(1)}
+                  </PopoverItem>
+                ))}
+              </Popover>
             </div>
           </div>
           <h1 className="mt-8 max-w-[710px] font-display text-[26px] leading-[1.12] tracking-[-0.048em] text-[#f0f2f6] sm:text-[34px]">{notebook.title}</h1>
@@ -124,37 +385,33 @@ export function ChatCanvas({ notebook, sources, onToast }: ChatCanvasProps) {
             <p>These sources offer a practical framework for <strong className="font-semibold text-[#eef0f4]">reading, evaluating, and connecting academic work</strong> without losing sight of the original evidence. Begin with the author&apos;s question, trace the method that supports it, and keep a note of what the source does not claim.</p>
             <p>For a stronger literature review, group papers by <strong className="font-semibold text-[#eef0f4]">argument and method</strong> rather than by publication date alone. That makes patterns visible: where findings converge, where definitions diverge, and which assumptions deserve a sharper question.</p>
           </div>
-          {messages.length > 0 && (
+          {(messages.length > 0 || loadingHistory) && (
             <div className="mt-8 space-y-4">
+              {loadingHistory && !messages.length && (
+                <div className="flex justify-center py-8">
+                  <Loader2 size={24} className="animate-spin text-[#7ea7ff]" />
+                </div>
+              )}
               {messages.map((message, index) => (
-                <div key={`${message.role}-${index}`} className={`flex gap-3 ${message.role === "user" ? "justify-end" : "justify-start"}`}>
-                  <div className={`max-w-[88%] rounded-2xl px-4 py-3 text-[14px] leading-6 ${message.role === "user" ? "bg-[#34446c] text-[#edf2ff]" : "border border-[#3b404a] bg-[#282b31] text-[#ccd1da]"}`}>
-                    {message.text}
-                  </div>
-                </div>
+                <div key={`${message.id}-${index}`}>{renderMessage(message)}</div>
               ))}
-              {sending && (
-                <div className="flex justify-start">
-                  <div className="flex items-center gap-2 rounded-2xl border border-[#3b404a] bg-[#282b31] px-4 py-3 text-[14px] text-[#ccd1da]">
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "0ms" }} />
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "150ms" }} />
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-[#7ea7ff]" style={{ animationDelay: "300ms" }} />
-                  </div>
-                </div>
+              {hasMoreHistory && messages.length > 0 && (
+                <button onClick={loadMoreHistory} disabled={loadingHistory} className="mx-auto flex items-center justify-center gap-2 rounded-full border border-[#3c414b] bg-[#24272c] px-4 py-2 text-[13px] text-[#d4d8e1] transition hover:border-[#65708b] hover:bg-[#2c3038] disabled:opacity-50">
+                  {loadingHistory ? <Loader2 size={14} className="animate-spin" /> : 'Load more'}
+                </button>
               )}
             </div>
           )}
         </div>
       </div>
 
-      {/* Input */}
       <div className="border-t border-[#30343b] px-5 py-4 sm:px-8">
         <div className="mx-auto flex max-w-[720px] items-end gap-3 rounded-[17px] border border-[#4a4f59] bg-[#24272c] p-3 shadow-[0_10px_30px_rgba(0,0,0,.12)] transition focus-within:border-[#748bc5] focus-within:ring-1 focus-within:ring-[#5f75b1]/40">
           <textarea
             ref={textareaRef}
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
-            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendPrompt(); } }}
+            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendPrompt(); } }}
             rows={1}
             placeholder="Ask a question or create something"
             className="max-h-28 min-h-[34px] flex-1 resize-none bg-transparent px-2 py-1.5 text-[14px] leading-6 text-[#eef0f4] outline-none placeholder:text-[#858d99]"

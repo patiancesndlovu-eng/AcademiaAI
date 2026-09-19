@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { X, Sparkles } from "lucide-react";
 
 interface ModalShellProps {
@@ -9,6 +9,19 @@ interface ModalShellProps {
 }
 
 export function ModalShell({ title, onClose, children, size = "standard" }: ModalShellProps) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    const original = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = original;
+    };
+  }, [onClose]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0d0f12]/75 p-4 backdrop-blur-[3px] animate-fade-in" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div className={`max-h-[90vh] w-full overflow-y-auto rounded-[20px] border border-[#3e434e] bg-[#202327] shadow-[0_28px_90px_rgba(0,0,0,.55)] animate-modal-in ${size === "wide" ? "max-w-[820px]" : "max-w-[900px]"}`}>
@@ -19,7 +32,7 @@ export function ModalShell({ title, onClose, children, size = "standard" }: Moda
             </span>
             <h2 className="font-display text-[18px] text-[#f0f2f6]">{title}</h2>
           </div>
-          <button onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full bg-[#373b43] text-[#d6d9df] transition hover:bg-[#4a4f59] hover:text-white">
+          <button onClick={onClose} aria-label="Close modal" className="flex h-9 w-9 items-center justify-center rounded-full bg-[#373b43] text-[#d6d9df] transition hover:bg-[#4a4f59] hover:text-white">
             <X size={18} />
           </button>
         </div>
