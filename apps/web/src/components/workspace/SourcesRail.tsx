@@ -1,16 +1,57 @@
 import { useMemo, useState, useEffect, useRef } from "react";
-import { Plus, Search, Sparkles, Globe2, ChevronDown, PanelLeft, SlidersHorizontal, MoreVertical, Check, Loader2, Download, ExternalLink, Trash2, RotateCcw } from "lucide-react";
+import { Plus, Search, Sparkles, Globe2, ChevronDown, PanelLeft, SlidersHorizontal, MoreVertical, Check, Loader2, Download, ExternalLink, Trash2, RotateCcw, ArrowRight, AlertCircle } from "lucide-react";
 import { SourceGlyph } from "@/components/common/Primitives";
 import { Popover, PopoverItem } from "@/components/common/Popover";
-import { batchSelectSources, deleteSource, retrySource } from "@/lib/api";
+import { batchSelectSources, deleteSource, retrySource, searchWebSources, addUrlSource, type WebSearchResult } from "@/lib/api";
 
 interface SourcesRailProps {
   notebookId: string;
   sources: any[];
   onSourcesChanged: (sources: any[]) => void;
+  onSourcesAdded?: (sources: any[]) => void;
   onAdd: (mode?: "url" | "text") => void;
   onToggle: () => void;
   onToast: (message: string) => void;
+}
+
+/** Frontend mirror of the backend canonicalizer — same rules, no query stripping. */
+function normalizeUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw.trim());
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    const host = u.hostname.toLowerCase();
+    const isDefaultPort = (u.protocol === "http:" && u.port === "80") || (u.protocol === "https:" && u.port === "443");
+    let path = u.pathname;
+    if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+    return `${u.protocol}//${host}${u.port && !isDefaultPort ? `:${u.port}` : ""}${path}${u.search}${u.hash}`;
+  } catch {
+    return null;
+  }
+}
+
+function mapSearchError(e: any): string {
+  switch (e?.code) {
+    case "SEARCH_DISABLED":
+      return "Web search is currently unavailable.";
+    case "SEARCH_TIMEOUT":
+      return "Web search timed out. Try again.";
+    case "RATE_LIMITED":
+      return "Too many searches. Please wait a moment and try again.";
+    default:
+      return "We couldn't search the web right now.";
+  }
+}
+
+/** Bounded parallel runner — never Promise.all(100 URLs). */
+async function runPool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) {
+      const item = items[i++];
+      await fn(item);
+    }
+  });
+  await Promise.all(workers);
 }
 
 function mapTypeToKind(type: string): string {
@@ -36,7 +77,7 @@ function capitalize(text: string) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onToggle, onToast }: SourcesRailProps) {
+export function SourcesRail({ notebookId, sources, onSourcesChanged, onSourcesAdded, onAdd, onToggle, onToast }: SourcesRailProps) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Mirror of `selected` for async handlers: rapid toggles read the latest
@@ -56,21 +97,34 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
   const sortRef = useRef<HTMLButtonElement>(null);
   const actionsRef = useRef<HTMLButtonElement>(null);
 
+  // Web search state (moved here from AddSourcesModal — rail owns discovery now)
+  const [results, setResults] = useState<WebSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const searchReqRef = useRef(0);
+  const searchAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      searchReqRef.current += 1;
+      searchAbortRef.current?.abort();
+    };
+  }, []);
+
   useEffect(() => {
     const next = new Set(sources.filter((s) => s.selected).map((s) => s.id));
     selectedRef.current = next;
     setSelected(next);
   }, [sources]);
 
-  /* Local filter + sort */
+  /* Local sort + type/scope filter (web search replaced the text filter) */
   const filtered = useMemo(() => {
     let list = sources.filter((source) => {
-      const matchesQuery = !query.trim() ||
-        source.title?.toLowerCase().includes(query.toLowerCase()) ||
-        source.domain?.toLowerCase().includes(query.toLowerCase());
       const matchesType = !typeFilter || source.type === typeFilter;
       const matchesScope = scopeFilter === "all" || selected.has(source.id);
-      return matchesQuery && matchesType && matchesScope;
+      return matchesType && matchesScope;
     });
     if (sortBy === "title") {
       list.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
@@ -78,7 +132,91 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
       list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
     }
     return list;
-  }, [sources, query, sortBy, typeFilter, scopeFilter, selected]);
+  }, [sources, sortBy, typeFilter, scopeFilter, selected]);
+
+  const existingUrls = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of sources) {
+      if (!s?.canonicalUrl) continue;
+      const n = normalizeUrl(s.canonicalUrl);
+      if (n) set.add(n);
+    }
+    return set;
+  }, [sources]);
+
+  const isAlreadyImported = (url: string) => {
+    const n = normalizeUrl(url);
+    return n ? existingUrls.has(n) : false;
+  };
+
+  const doSearch = async () => {
+    const q = query.trim();
+    if (q.length < 2 || searching || importing) return;
+    searchAbortRef.current?.abort();
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+    const req = ++searchReqRef.current;
+    setSearching(true);
+    setSearchError(null);
+    try {
+      const res = await searchWebSources(notebookId, q, 8, controller.signal);
+      if (searchReqRef.current !== req) return; // stale — a newer search won
+      setResults(res.results ?? []);
+      setHasSearched(true);
+    } catch (e: any) {
+      if (controller.signal.aborted || searchReqRef.current !== req) return;
+      setResults([]);
+      setHasSearched(true);
+      setSearchError(mapSearchError(e));
+    } finally {
+      if (searchReqRef.current === req) setSearching(false);
+    }
+  };
+
+  const clearSearch = () => {
+    searchReqRef.current += 1;
+    searchAbortRef.current?.abort();
+    setResults([]);
+    setSearchError(null);
+    setHasSearched(false);
+  };
+
+  const freshResults = results.filter((r) => !isAlreadyImported(r.url));
+
+  const handleImportAll = async () => {
+    if (freshResults.length === 0 || importing || searching) return;
+    setImporting(true);
+    const created: any[] = [];
+    let duplicates = 0;
+    let failed = 0;
+    let lastError = "";
+    await runPool(freshResults, 3, async (r) => {
+      try {
+        created.push(await addUrlSource(notebookId, { url: r.url, title: r.title }));
+      } catch (e: any) {
+        if (e?.code === "CONFLICT") duplicates += 1;
+        else {
+          failed += 1;
+          lastError = e?.message || "Import failed";
+        }
+      }
+    });
+    setImporting(false);
+    if (created.length > 0) {
+      const parts = [`${created.length} source${created.length === 1 ? "" : "s"} imported`];
+      if (duplicates > 0) parts.push(`${duplicates} already in notebook`);
+      if (failed > 0) parts.push(`${failed} failed`);
+      onToast(parts.join(" · "));
+      clearSearch();
+      // ponytail: route through parent poll when available so queued imports settle to ready; direct prepend otherwise.
+      if (onSourcesAdded) onSourcesAdded(created);
+      else onSourcesChanged([...created, ...sources]);
+    } else if (duplicates > 0 || freshResults.length === 0) {
+      onToast("Already in this notebook");
+    } else {
+      onToast(lastError || "Import failed");
+    }
+  };
 
   const allSelected = filtered.length > 0 && filtered.every((source) => selected.has(source.id));
   const linkedSources = useMemo(() => sources.filter((s) => s.canonicalUrl), [sources]);
@@ -195,9 +333,20 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search these sources"
+              onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) doSearch(); }}
+              placeholder="Search the web for new sources"
+              aria-label="Search the web for new sources"
               className="w-full bg-transparent text-[13px] text-[#edf0f4] outline-none placeholder:text-[#858c98] focus:outline-none"
             />
+            <button
+              onClick={doSearch}
+              disabled={query.trim().length < 2 || searching || importing}
+              aria-label="Search the web"
+              title="Search the web"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#343941] text-[#b3bdd0] transition hover:bg-[#495263] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {searching ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}
+            </button>
           </div>
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
             {/* Type filter dropdown */}
@@ -222,9 +371,58 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
                 <PopoverItem active={scopeFilter === "selected"} onClick={() => { setScopeFilter("selected"); setScopeOpen(false); }}>Selected only</PopoverItem>
               </Popover>
             </div>
-            <button onClick={() => onAdd("url")} aria-label="Add a web source" title="Add a web source" className="ml-auto flex h-7 w-7 items-center justify-center rounded-full bg-[#343941] text-[#b3bdd0] transition hover:bg-[#495263]"><Search size={14} /></button>
           </div>
         </div>
+        {(searching || searchError || hasSearched) && (
+          <div className="mt-3 rounded-2xl border border-[#3b3f48] bg-[#24272d] p-3">
+            {searching && (
+              <p className="flex items-center gap-2 text-[13px] text-[#9ba2ae]"><Loader2 size={14} className="animate-spin" /> Researching websites…</p>
+            )}
+            {searchError && !searching && (
+              <div className="flex items-start gap-2 rounded-xl border border-[#c05a5a] bg-[#2d2426] p-3 text-sm text-[#f0d0d0]">
+                <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                <span className="min-w-0 flex-1">{searchError}</span>
+                <button onClick={doSearch} className="shrink-0 text-xs underline hover:text-white">Retry</button>
+              </div>
+            )}
+            {!searching && !searchError && hasSearched && results.length === 0 && (
+              <p className="text-[13px] text-[#9ba2ae]">No results found for this search. Try different keywords.</p>
+            )}
+            {!searching && !searchError && results.length > 0 && (
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#858c98]">Web search completed!</p>
+                  <button onClick={clearSearch} disabled={importing} className="text-xs text-[#cbd0d8] transition hover:text-white disabled:opacity-50">Delete</button>
+                </div>
+                <div className="max-h-[260px] space-y-2 overflow-y-auto pr-0.5">
+                  {results.slice(0, 3).map((r) => {
+                    const already = isAlreadyImported(r.url);
+                    return (
+                      <div key={r.url} className={already ? "opacity-55" : ""}>
+                        <p className="truncate text-[13px] font-medium text-[#e4e7ec]">{r.title}</p>
+                        {r.snippet && <p className="mt-0.5 line-clamp-2 text-[12px] leading-5 text-[#9ba2ae]">{r.snippet}</p>}
+                        {already && <span className="mt-1 inline-block rounded bg-[#30343b] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[#9ebaff]">Already imported</span>}
+                      </div>
+                    );
+                  })}
+                  {results.length > 3 && (
+                    <p className="text-[12px] text-[#858d9a]">{results.length - 3} more source{results.length - 3 === 1 ? "" : "s"}</p>
+                  )}
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <button
+                    disabled={freshResults.length === 0 || importing || searching}
+                    onClick={handleImportAll}
+                    className="inline-flex items-center gap-2 rounded-full bg-[#6f8ff0] px-5 py-2 text-[13px] font-semibold text-[#141b2d] transition hover:bg-[#92abff] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {importing ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}
+                    {importing ? "Importing…" : freshResults.length > 0 ? "Import" : "Imported"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <div className="flex items-center justify-between px-4 pb-2 text-xs text-[#8f96a3]">
         <div className="flex items-center gap-1">
@@ -256,12 +454,12 @@ export function SourcesRail({ notebookId, sources, onSourcesChanged, onAdd, onTo
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-5 [scrollbar-color:#454b57_transparent] [scrollbar-width:thin]">
-        {filtered.length === 0 && !query && sources.length === 0 && (
+        {filtered.length === 0 && sources.length === 0 && (
           <div className="px-4 py-8 text-center text-xs text-[#858d9a]">
             No sources yet. Click "Add sources" to get started.
           </div>
         )}
-        {filtered.length === 0 && (query || typeFilter || scopeFilter === "selected") && (
+        {filtered.length === 0 && sources.length > 0 && (typeFilter || scopeFilter === "selected") && (
           <div className="px-4 py-8 text-center text-xs text-[#858d9a]">
             No sources match your filters.
           </div>

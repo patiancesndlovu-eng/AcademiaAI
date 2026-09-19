@@ -164,6 +164,33 @@ export async function retrySource(sourceId: string) {
   return data
 }
 
+// Web search for source discovery (SerpAPI stays server-side)
+export interface WebSearchResult {
+  title: string
+  url: string
+  domain: string
+  snippet: string
+  retrievedAt: string
+}
+
+export interface WebSearchResponse {
+  results: WebSearchResult[]
+  query: string
+}
+
+export async function searchWebSources(
+  notebookId: string,
+  query: string,
+  limit = 8,
+  signal?: AbortSignal
+): Promise<WebSearchResponse> {
+  const { data } = await api.get(`/notebooks/${notebookId}/sources/search`, {
+    params: { q: query, limit },
+    signal,
+  })
+  return data
+}
+
 export async function getMe() {
   const { data } = await api.get('/me')
   return data

@@ -3,9 +3,10 @@ import { z } from 'zod'
 import { requireApiAuth, syncUserToDb } from '../middleware/auth'
 import { requireNotebookRole } from '../middleware/authorization'
 import { validateBody, validateParams, validateQuery } from '../middleware/validateRequest'
-import { uploadLimiter, urlIngestionLimiter, retryLimiter } from '../middleware/rateLimit'
+import { uploadLimiter, urlIngestionLimiter, retryLimiter, searchLimiter } from '../middleware/rateLimit'
 import { success } from '../utils/response'
-import { notFound } from '../utils/errors'
+import { AppError, notFound } from '../utils/errors'
+import { isSearchConfigured, searchWeb } from '../providers/search'
 import * as sourceService from '../services/sources'
 
 const router = Router()
@@ -51,6 +52,37 @@ const updateSourceSchema = z
     selected: z.boolean().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, { message: 'At least one field is required' })
+
+const webSearchQuerySchema = z.object({
+  q: z.string().trim().min(2).max(200),
+  limit: z.coerce.number().int().min(1).max(10).optional().default(8),
+})
+
+// GET /api/v1/notebooks/:id/sources/search — discover URLs to import (viewer+).
+// Importing stays editor+ via POST .../sources/url. Never exposes raw
+// provider payloads or keys; disabled/timeout/provider-failure are distinct
+// error codes so the UI never shows "no results" for a broken search.
+router.get(
+  '/notebooks/:id/sources/search',
+  requireApiAuth,
+  syncUserToDb,
+  requireNotebookRole('viewer'),
+  searchLimiter,
+  validateParams(notebookIdSchema),
+  validateQuery(webSearchQuerySchema),
+  async (req, res, next) => {
+    try {
+      if (!isSearchConfigured()) {
+        return next(new AppError('SEARCH_DISABLED', 'Web search is currently unavailable', 503, false))
+      }
+      const { q, limit } = req.query as unknown as { q: string; limit: number }
+      const results = await searchWeb(q)
+      res.json(success({ results: results.slice(0, limit), query: q.trim() }, req.requestId))
+    } catch (err) {
+      next(err)
+    }
+  }
+)
 
 // GET /api/v1/notebooks/:id/sources — viewer+
 router.get(

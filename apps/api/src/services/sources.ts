@@ -8,8 +8,9 @@ import { invalidateSourceListCache, invalidateRetrievalCache } from '../cache/in
 import { cacheKeys, cacheTtls } from '../cache/keys'
 import { getOrSet } from '../cache/cache'
 import { normalizeText, countWords } from '../utils/text'
+import { normalizeCanonicalUrl } from '../utils/url'
 import { chunkText } from '../utils/chunker'
-import { serviceUnavailable } from '../utils/errors'
+import { badRequest, conflict, serviceUnavailable } from '../utils/errors'
 
 /**
  * Source service. Heavy processing (URL fetch, PDF/OCR, chunking of uploads)
@@ -61,6 +62,7 @@ export async function listSources(notebookId: string, options: ListSourcesOption
           id: true,
           type: true,
           title: true,
+          canonicalUrl: true,
           domain: true,
           status: true,
           selected: true,
@@ -140,14 +142,28 @@ export async function addUrlSource(
   data: { url: string; title?: string },
   meta: { requestId?: string }
 ) {
-  const domain = new URL(data.url).hostname
+  const canonical = normalizeCanonicalUrl(data.url)
+  if (!canonical) {
+    throw badRequest('Only http(s) URLs can be imported as sources')
+  }
+
+  // Duplicate protection: same normalized URL, same notebook, not deleted.
+  const existing = await prisma.source.findFirst({
+    where: { notebookId, canonicalUrl: canonical, deletedAt: null },
+    select: { id: true },
+  })
+  if (existing) {
+    throw conflict('This URL is already a source in this notebook')
+  }
+
+  const domain = new URL(canonical).hostname
 
   const source = await prisma.source.create({
     data: {
       notebookId,
       type: SourceType.url,
       title: (data.title || domain).slice(0, 200),
-      canonicalUrl: data.url,
+      canonicalUrl: canonical,
       domain,
       status: SourceStatus.queued,
     },

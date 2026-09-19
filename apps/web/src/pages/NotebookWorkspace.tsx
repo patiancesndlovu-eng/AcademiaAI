@@ -105,6 +105,35 @@ export default function NotebookWorkspace() {
     else setStudioOpen((prev) => !prev);
   };
 
+  const handleSourcesAdded = (s: any[]) => {
+    // Merge by id — never duplicate entries when overlapping
+    // imports/polls resolve out of order.
+    setSources((prev) => {
+      const known = new Set(prev.map((x: any) => x.id));
+      const fresh = s.filter((x: any) => !known.has(x.id));
+      return [...fresh, ...prev];
+    });
+    setModal(null);
+    setAddSourcesMode(null);
+    // Ingestion runs in the worker; refetch until new sources settle.
+    // ponytail: fixed 5s x12 poll, replace with SSE/push when the backend supports it.
+    const ids = new Set(s.map((x: any) => x.id));
+    let rounds = 0;
+    const poll = async () => {
+      rounds += 1;
+      try {
+        const fresh = await getSources(notebook.id, { pageSize: 100 });
+        setSources(fresh?.data || []);
+        const pending = (fresh?.data || []).some((x: any) => ids.has(x.id) && (x.status === 'queued' || x.status === 'processing'));
+        if (!pending || rounds >= 12) return;
+      } catch {
+        if (rounds >= 12) return;
+      }
+      pollTimersRef.current.push(window.setTimeout(poll, 5000));
+    };
+    pollTimersRef.current.push(window.setTimeout(poll, 5000));
+  };
+
   const selectedSourceCount = sources.filter((s) => s.selected).length;
 
   if (loading) {
@@ -171,6 +200,7 @@ export default function NotebookWorkspace() {
             notebookId={notebook.id}
             sources={sources}
             onSourcesChanged={handleSourcesChanged}
+            onSourcesAdded={handleSourcesAdded}
             onAdd={(mode) => { setAddSourcesMode(mode ?? null); setModal("sources"); }}
             onToggle={toggleSources}
             onToast={showToast}
@@ -225,28 +255,7 @@ export default function NotebookWorkspace() {
           notebookId={notebook.id}
           initialMode={addSourcesMode}
           onClose={() => { setModal(null); setAddSourcesMode(null); }}
-          onSourcesAdded={(s) => {
-            setSources((prev) => [...s, ...prev]);
-            setModal(null);
-            setAddSourcesMode(null);
-            // Ingestion runs in the worker; refetch until new sources settle.
-            // ponytail: fixed 5s x12 poll, replace with SSE/push when the backend supports it.
-            const ids = new Set(s.map((x: any) => x.id));
-            let rounds = 0;
-            const poll = async () => {
-              rounds += 1;
-              try {
-                const fresh = await getSources(notebook.id, { pageSize: 100 });
-                setSources(fresh?.data || []);
-                const pending = (fresh?.data || []).some((x: any) => ids.has(x.id) && (x.status === 'queued' || x.status === 'processing'));
-                if (!pending || rounds >= 12) return;
-              } catch {
-                if (rounds >= 12) return;
-              }
-              pollTimersRef.current.push(window.setTimeout(poll, 5000));
-            };
-            pollTimersRef.current.push(window.setTimeout(poll, 5000));
-          }}
+          onSourcesAdded={handleSourcesAdded}
           onToast={showToast}
         />
       )}

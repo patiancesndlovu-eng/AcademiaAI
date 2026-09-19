@@ -79,3 +79,4 @@ export const chatLimiter = lazyTier({ windowMs: 60_000, max: 20, prefix: 'chat' 
 export const uploadLimiter = lazyTier({ windowMs: 60 * 60_000, max: 30, prefix: 'upload' })
 export const urlIngestionLimiter = lazyTier({ windowMs: 60 * 60_000, max: 20, prefix: 'urlingest' })
 export const retryLimiter = lazyTier({ windowMs: 60 * 60_000, max: 30, prefix: 'retry' })
+export const searchLimiter = lazyTier({ windowMs: 60_000, max: 20, prefix: 'search' })
