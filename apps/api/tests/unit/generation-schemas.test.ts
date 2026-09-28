@@ -90,34 +90,56 @@ describe('generation config schemas (spec §60)', () => {
   })
 
   describe('generationConfigSchema (discriminated union)', () => {
-    it('accepts quiz type', () => {
-      const result = generationConfigSchema.parse({ type: 'quiz', config: { questionCount: 5 } })
+    const ids = ['ckabc123defg456hij789klm1', 'ckabc123defg456hij789klm2']
+
+    it('accepts quiz type with sourceIds', () => {
+      const result = generationConfigSchema.parse({ type: 'quiz', sourceIds: ids, config: { questionCount: 5 } })
       expect(result.type).toBe('quiz')
       expect(result.config.questionCount).toBe(5)
+      expect(result.sourceIds).toEqual([...ids].sort())
     })
 
     it('accepts flashcards type', () => {
-      const result = generationConfigSchema.parse({ type: 'flashcards', config: { count: 10 } })
+      const result = generationConfigSchema.parse({ type: 'flashcards', sourceIds: ids, config: { count: 10 } })
       expect(result.type).toBe('flashcards')
     })
 
-    it('accepts summary type', () => {
-      const result = generationConfigSchema.parse({ type: 'summary', config: { length: 'short' } })
+    it('accepts summary type with topic', () => {
+      const result = generationConfigSchema.parse({ type: 'summary', sourceIds: ids, config: { length: 'short', topic: 'normalization' } })
       expect(result.type).toBe('summary')
+      if (result.type === 'summary') expect(result.config.topic).toBe('normalization')
     })
 
     it('accepts report type', () => {
-      const result = generationConfigSchema.parse({ type: 'report', config: {} })
+      const result = generationConfigSchema.parse({ type: 'report', sourceIds: ids, config: {} })
       expect(result.type).toBe('report')
     })
 
     it('accepts mindmap type', () => {
-      const result = generationConfigSchema.parse({ type: 'mindmap', config: {} })
+      const result = generationConfigSchema.parse({ type: 'mindmap', sourceIds: ids, config: {} })
       expect(result.type).toBe('mindmap')
     })
 
     it('rejects unknown type', () => {
-      expect(() => generationConfigSchema.parse({ type: 'unknown', config: {} })).toThrow()
+      expect(() => generationConfigSchema.parse({ type: 'unknown', sourceIds: ids, config: {} })).toThrow()
+    })
+
+    it('rejects empty sourceIds instead of silently using all notebook sources', () => {
+      expect(() => generationConfigSchema.parse({ type: 'quiz', sourceIds: [], config: {} })).toThrow()
+    })
+
+    it('rejects missing sourceIds', () => {
+      expect(() => generationConfigSchema.parse({ type: 'quiz', config: {} })).toThrow()
+    })
+
+    it('dedupes and sorts sourceIds deterministically', () => {
+      const result = generationConfigSchema.parse({ type: 'quiz', sourceIds: [ids[1], ids[0], ids[1]], config: {} })
+      expect(result.sourceIds).toEqual([...ids].sort())
+    })
+
+    it('coerces numeric strings from the UI (questionCount "10" -> 10)', () => {
+      const result = generationConfigSchema.parse({ type: 'quiz', sourceIds: ids, config: { questionCount: '10', difficulty: 'medium' } })
+      if (result.type === 'quiz') expect(result.config.questionCount).toBe(10)
     })
   })
 })

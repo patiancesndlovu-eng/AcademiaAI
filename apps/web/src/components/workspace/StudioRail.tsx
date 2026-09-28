@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { PanelRight, Sparkles, Clipboard, ChevronRight, Headphones, Layers3, Video, Network, FileCheck2, BookOpenCheck, HelpCircle, ImageIcon, Grid2X2, Loader2, X, Check, AlertCircle } from "lucide-react";
 import { ModalShell } from "./ModalShell";
 import { QuizModal } from "./QuizModal";
-import { createGeneration, getGeneration, getGenerations, getNotes, createNote, deleteNote, type GenerationJob, type Note } from "@/lib/api";
+import { createGeneration, getGeneration, getGenerations, getNotes, createNote, deleteNote, buildGenerationRequest, generationErrorMessage, type GenerationJob, type Note } from "@/lib/api";
 
 type StudioKind = "audio" | "slides" | "video" | "map" | "report" | "flashcards" | "quiz" | "infographic" | "table" | "summary" | "mindmap";
 
@@ -55,7 +55,6 @@ interface StudioRailProps {
   onToggle: () => void;
   onUsePrompt: (text: string) => void;
   onToast?: (message: string) => void;
-  selectedSourceCount: number;
   notebookId: string;
   sources: any[];
 }
@@ -90,12 +89,14 @@ function OutputViewer({ job, onClose }: { job: GenerationJob; onClose: () => voi
               {revealed.has(i) ? "Hide answer" : "Show answer"}
             </button>
             {revealed.has(i) && q.explanation && <p className="mt-1 text-[12px] text-[#9ba2ae]">{q.explanation}</p>}
+            <CitationChips content={content} indices={q.citations} />
           </div>
         ))}
         {job.type === 'flashcards' && Array.isArray(content.cards) && content.cards.map((c: any, i: number) => (
           <div key={i} className="rounded-xl border border-[#3b3f48] bg-[#25282d] p-4">
             <p className="font-medium text-[#eef0f4]">{c.front}</p>
             <p className="mt-2 border-t border-[#30343b] pt-2 text-[13px]">{c.back}</p>
+            <CitationChips content={content} indices={c.citations} />
           </div>
         ))}
         {job.type === 'summary' && (
@@ -106,18 +107,50 @@ function OutputViewer({ job, onClose }: { job: GenerationJob; onClose: () => voi
                 {content.keyPoints.map((k: string, i: number) => <li key={i}>{k}</li>)}
               </ul>
             )}
+            <CitationChips content={content} indices={content.citations} />
           </div>
         )}
         {job.type === 'report' && Array.isArray(content.sections) && content.sections.map((s: any, i: number) => (
           <div key={i} className="rounded-xl border border-[#3b3f48] bg-[#25282d] p-4">
             <p className="font-display text-[16px] text-[#f0f2f6]">{s.heading}</p>
             <p className="mt-1.5 text-[13px]">{s.content}</p>
+            <CitationChips content={content} indices={s.citations} />
           </div>
         ))}
         {job.type === 'mindmap' && content.root && <MindmapNode node={content.root} depth={0} />}
+        {(job.type === 'mindmap' || job.type === 'report') && <CitationChips content={content} />}
       </div>
     </ModalShell>
   );
+}
+
+/** Inline source citations resolved by the backend: [n] → real source/chunk/page. */
+function CitationChips({ content, indices }: { content: any; indices?: number[] }) {
+  const sources: any[] = Array.isArray(content?.sources) ? content.sources : [];
+  if (sources.length === 0) return null;
+  const shown = indices && indices.length > 0 ? sources.filter((s) => indices.includes(s.index)) : sources;
+  if (shown.length === 0) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {shown.map((s) => (
+        <span key={s.index} title={s.quote ?? s.sourceTitle} className="inline-flex items-center gap-1 rounded-full bg-[#2d3652] px-2.5 py-1 text-[11px] text-[#9ebaff]">
+          📄 {s.sourceTitle}{s.page ? ` · p. ${s.page}` : ""}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function jobDetail(job: GenerationJob): string | null {
+  const c = job.config ?? {};
+  const sourceCount = job.sourceIds?.length;
+  const parts: string[] = [];
+  if (job.type === "quiz" && c.questionCount) parts.push(`${c.questionCount} questions`);
+  if (job.type === "quiz" && c.difficulty) parts.push(String(c.difficulty));
+  if (job.type === "flashcards" && c.count) parts.push(`${c.count} cards`);
+  if ((job.type === "summary" || job.type === "report") && c.length) parts.push(String(c.length));
+  if (sourceCount) parts.push(`${sourceCount} ${sourceCount === 1 ? "source" : "sources"}`);
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 function MindmapNode({ node, depth }: { node: any; depth: number }) {
@@ -161,37 +194,33 @@ function NoteModal({ onClose, onSave }: { onClose: () => void; onSave: (text: st
   );
 }
 
-function GenerationConfigModal({ 
-  kind, 
-  title, 
-  sourceCount, 
-  onClose, 
+function GenerationConfigModal({
+  kind,
+  title,
+  sourceIds,
+  onClose,
   onGenerate,
   notebookId,
-}: { 
-  kind: StudioKind; 
-  title: string; 
-  sourceCount: number; 
-  onClose: () => void; 
-  onGenerate: (config: any) => void;
+}: {
+  kind: StudioKind;
+  title: string;
+  sourceIds: string[];
+  onClose: () => void;
+  onGenerate: (job: GenerationJob) => void;
   notebookId: string;
 }) {
   const [generating, setGenerating] = useState(false);
   const [polling, setPolling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<any>({});
-  const hasSources = sourceCount > 0;
+  const hasSources = sourceIds.length > 0;
+  const sourceCount = sourceIds.length;
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const configFields: { key: string; label: string; options?: string[]; default: string }[] = 
-    kind === 'quiz' ? [
-      { key: 'questionCount', label: 'Number of questions', options: ['5', '10', '20', '50'], default: '10' },
-      { key: 'difficulty', label: 'Difficulty', options: ['easy', 'medium', 'hard'], default: 'medium' },
-      { key: 'topic', label: 'Topic (optional)', default: '' },
-    ] :
+  // Quiz lives in QuizModal; flashcards/mindmap have no topic field on the backend.
+  const configFields: { key: string; label: string; options?: string[]; default: string }[] =
     kind === 'flashcards' ? [
       { key: 'count', label: 'Number of cards', options: ['10', '20', '50', '100'], default: '20' },
-      { key: 'topic', label: 'Topic (optional)', default: '' },
     ] :
     kind === 'summary' ? [
       { key: 'length', label: 'Length', options: ['short', 'medium', 'long'], default: 'medium' },
@@ -204,7 +233,6 @@ function GenerationConfigModal({
     kind === 'mindmap' ? [
       { key: 'maxNodes', label: 'Max nodes', options: ['20', '50', '100', '200'], default: '50' },
       { key: 'depth', label: 'Depth', options: ['1', '2', '3', '4', '5'], default: '3' },
-      { key: 'topic', label: 'Focus (optional)', default: '' },
     ] : [
       { key: 'topic', label: 'Topic (optional)', default: '' },
     ];
@@ -225,12 +253,7 @@ function GenerationConfigModal({
     setError(null);
 
     try {
-      const res = await createGeneration(notebookId, {
-        type: kind,
-        config: Object.fromEntries(
-          Object.entries(config).filter(([, v]) => v !== '')
-        ),
-      });
+      const res = await createGeneration(notebookId, buildGenerationRequest(kind, sourceIds, config));
 
       setGenerating(false);
       setPolling(true);
@@ -259,12 +282,12 @@ function GenerationConfigModal({
         if (job.status === 'completed') {
           clearInterval(interval);
           setPolling(false);
-          onGenerate({});
+          onGenerate(job);
           onClose();
         } else if (job.status === 'failed' || job.status === 'cancelled') {
           clearInterval(interval);
           setPolling(false);
-          setError(job.error || `Generation ${job.status}`);
+          setError(generationErrorMessage(job.error));
         }
       } catch (e) {
         console.error('Polling error:', e);
@@ -336,7 +359,7 @@ function GenerationConfigModal({
   );
 }
 
-export function StudioRail({ onToggle, onUsePrompt, onToast, selectedSourceCount, notebookId, sources }: StudioRailProps) {
+export function StudioRail({ onToggle, onUsePrompt, onToast, notebookId, sources }: StudioRailProps) {
   const [activeModal, setActiveModal] = useState<StudioKind | null>(null);
   const [noteOpen, setNoteOpen] = useState(false);
   const [quizOpen, setQuizOpen] = useState(false);
@@ -367,6 +390,17 @@ export function StudioRail({ onToggle, onUsePrompt, onToast, selectedSourceCount
       setServerJobs(await getGenerations(notebookId));
     } catch {
       // keep last-known list on failure; never wipe good state
+    }
+  };
+
+  const handleRetry = async (job: GenerationJob) => {
+    try {
+      // Retry reuses the original source snapshot + config, not live UI state.
+      await createGeneration(notebookId, buildGenerationRequest(job.type, job.sourceIds ?? [], job.config ?? {}));
+      await refreshServerJobs();
+      onToast?.("Retrying generation — see Generated above");
+    } catch (e: any) {
+      onToast?.(e?.message || "Failed to retry generation");
     }
   };
 
@@ -450,20 +484,33 @@ export function StudioRail({ onToggle, onUsePrompt, onToast, selectedSourceCount
               <div className="mb-5 space-y-2">
                 <p className="px-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#858c98]">Generated</p>
                 {serverJobs.map((job) => (
-                  <button
+                  <div
                     key={job.id}
+                    role={job.status === 'completed' && job.output ? "button" : undefined}
+                    tabIndex={job.status === 'completed' && job.output ? 0 : undefined}
                     onClick={() => { if (job.status === 'completed' && job.output) setViewing(job); }}
-                    disabled={job.status !== 'completed' || !job.output}
-                    className="flex w-full items-start gap-2.5 rounded-xl border border-white/[0.05] bg-[#26292f] p-3 text-left transition hover:border-white/20 disabled:cursor-default"
+                    onKeyDown={(e) => { if (e.key === 'Enter' && job.status === 'completed' && job.output) setViewing(job); }}
+                    className="w-full rounded-xl border border-white/[0.05] bg-[#26292f] p-3 text-left transition hover:border-white/20"
                   >
-                    <span className="mt-0.5 shrink-0 text-[#9ebaff]">{outputIcon((job.output?.type ?? job.type) as StudioOutput["kind"])}</span>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-[12px] font-medium text-[#e4e7ec]">{job.output?.title ?? `${job.type.charAt(0).toUpperCase() + job.type.slice(1)}`}</p>
-                      <p className="mt-1 text-[10px] text-[#707783]">
-                        {job.status === 'completed' ? `Ready · ${relativeTime(new Date(job.updatedAt).getTime())}` : job.status === 'failed' ? `Failed${job.error ? ` · ${job.error}` : ''}` : `${job.status} · ${job.progress}%`}
-                      </p>
+                    <div className="flex items-start gap-2.5">
+                      <span className="mt-0.5 shrink-0 text-[#9ebaff]">{outputIcon((job.output?.type ?? job.type) as StudioOutput["kind"])}</span>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[12px] font-medium text-[#e4e7ec]">{job.output?.title ?? `${job.type.charAt(0).toUpperCase() + job.type.slice(1)}`}</p>
+                        {jobDetail(job) && <p className="mt-0.5 truncate text-[10px] text-[#9ba2ae]">{jobDetail(job)}</p>}
+                        <p className="mt-1 text-[10px] text-[#707783]">
+                          {job.status === 'completed' ? `Ready · ${relativeTime(new Date(job.updatedAt).getTime())}` : job.status === 'failed' ? `Failed · ${generationErrorMessage(job.error)}` : `${job.status} · ${job.progress}%`}
+                        </p>
+                      </div>
                     </div>
-                  </button>
+                    {job.status === 'failed' && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); void handleRetry(job); }}
+                        className="mt-2 rounded-full border border-[#58606e] px-3 py-1.5 text-[11px] text-[#d9dde4] transition hover:bg-[#2b3039]"
+                      >
+                        Retry
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             )}
@@ -505,11 +552,10 @@ export function StudioRail({ onToggle, onUsePrompt, onToast, selectedSourceCount
         <GenerationConfigModal
           kind={activeModal}
           title={studioItems.find(i => i.kind === activeModal)?.title || activeModal}
-          sourceCount={selectedSourceCount}
+          sourceIds={sources.filter((s) => s.selected).map((s) => s.id)}
           onClose={() => setActiveModal(null)}
-          onGenerate={() => {
-            void refreshServerJobs();
-            onToast?.("Output generated — see Generated above");
+          onGenerate={(job) => {
+            void refreshServerJobs().then(() => setViewing(job));
           }}
           notebookId={notebookId}
         />
@@ -519,10 +565,9 @@ export function StudioRail({ onToggle, onUsePrompt, onToast, selectedSourceCount
           notebookId={notebookId}
           selectedSources={sources.filter((s) => s.selected)}
           onClose={() => setQuizOpen(false)}
-          onGenerated={() => {
+          onGenerated={(job) => {
             setQuizOpen(false);
-            void refreshServerJobs();
-            onToast?.("Quiz generated — see Generated above");
+            void refreshServerJobs().then(() => setViewing(job));
           }}
         />
       )}

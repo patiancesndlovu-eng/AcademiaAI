@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { extractCitationMarkers, validateCitations } from '../../src/utils/citations'
+import { extractCitationMarkers, validateCitations, resolveGenerationCitations, stripCodeFences } from '../../src/utils/citations'
 
 describe('extractCitationMarkers', () => {
   it('finds all [n] markers in order', () => {
@@ -30,5 +30,46 @@ describe('validateCitations', () => {
 
   it('returns empty for text without markers', () => {
     expect(validateCitations('no citations here', 5)).toEqual([])
+  })
+})
+
+describe('resolveGenerationCitations', () => {
+  const chunks = [
+    { chunkId: 'chunk_1', sourceId: 'src_a', sourceTitle: 'DBMS Unit II', page: 4, text: 'Normalization is the process of organizing data.' },
+    { chunkId: 'chunk_2', sourceId: 'src_b', sourceTitle: 'Design Notes', page: 7, text: 'A relation is normalized to reduce redundancy.' },
+  ]
+
+  it('resolves indexes to real chunk/source metadata', () => {
+    const output = { questions: [{ question: 'Q?', citations: [1, 2] }] }
+    const { cleaned, sources } = resolveGenerationCitations(output, chunks)
+    expect(cleaned.questions[0].citations).toEqual([1, 2])
+    expect(sources).toEqual([
+      { index: 1, chunkId: 'chunk_1', sourceId: 'src_a', sourceTitle: 'DBMS Unit II', page: 4, quote: chunks[0].text },
+      { index: 2, chunkId: 'chunk_2', sourceId: 'src_b', sourceTitle: 'Design Notes', page: 7, quote: chunks[1].text },
+    ])
+  })
+
+  it('drops out-of-range indexes instead of fabricating citations', () => {
+    const output = { questions: [{ question: 'Q?', citations: [1, 99, -1, 0] }], citations: [99] }
+    const { cleaned, sources } = resolveGenerationCitations(output, chunks)
+    expect(cleaned.questions[0].citations).toEqual([1])
+    expect(cleaned.citations).toEqual([])
+    expect(sources).toHaveLength(1)
+  })
+
+  it('does not mutate the original output', () => {
+    const output = { questions: [{ question: 'Q?', citations: [99] }] }
+    resolveGenerationCitations(output, chunks)
+    expect(output.questions[0].citations).toEqual([99])
+  })
+})
+
+describe('stripCodeFences', () => {
+  it('strips ```json fences models add around JSON output', () => {
+    expect(stripCodeFences('```json\n{"a":1}\n```')).toBe('{"a":1}')
+  })
+
+  it('leaves plain JSON unchanged', () => {
+    expect(stripCodeFences('{"a":1}')).toBe('{"a":1}')
   })
 })
