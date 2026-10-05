@@ -320,6 +320,7 @@ export interface GenerationJob {
   requestedBy: string
   type: string
   config: any
+  sourceIds: string[]
   status: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled'
   progress: number
   outputId?: string
@@ -342,7 +343,33 @@ export interface Output {
   updatedAt: string
 }
 
-export async function createGeneration(notebookId: string, body: { type: string; config: any }): Promise<{ jobId: string }> {
+/** Single canonical generation request builder: dedupes/sorts sourceIds, drops empty config values, coerces numeric strings. */
+export function buildGenerationRequest(type: string, sourceIds: string[], config: Record<string, any>): { type: string; sourceIds: string[]; config: Record<string, any> } {
+  const ids = [...new Set(sourceIds)].sort()
+  const cleaned: Record<string, any> = {}
+  for (const [k, v] of Object.entries(config)) {
+    if (v === '' || v === undefined || v === null) continue
+    cleaned[k] = typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)) && /^-?\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : v
+  }
+  return { type, sourceIds: ids, config: cleaned }
+}
+
+const GENERATION_ERROR_MESSAGES: Record<string, string> = {
+  NO_SOURCES_SELECTED: 'No usable sources were selected for this generation.',
+  SOURCE_NOT_READY: 'The selected sources are not ready yet. Wait for processing to finish and retry.',
+  SOURCE_NOT_FOUND: 'One or more selected sources are unavailable.',
+  GENERATION_FAILED: 'Generation failed. Please retry.',
+  AI_PROVIDER_ERROR: 'The AI provider failed. Please retry in a moment.',
+  INVALID_AI_OUTPUT: 'The AI returned an unusable result. Please retry.',
+  JOB_CANCELLED: 'Generation was cancelled.',
+}
+
+export function generationErrorMessage(code?: string): string {
+  if (!code) return 'Generation failed. Please retry.'
+  return GENERATION_ERROR_MESSAGES[code] ?? code
+}
+
+export async function createGeneration(notebookId: string, body: { type: string; sourceIds: string[]; config: any }): Promise<{ jobId: string }> {
   const { data } = await api.post(`/notebooks/${notebookId}/generations`, body)
   return data
 }

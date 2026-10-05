@@ -191,6 +191,8 @@ model GenerationJob {
   requestedBy String
   type        GenerationType
   config      Json
+  /// Source selection snapshot at creation time — async jobs never read live UI state.
+  sourceIds   String[]         @default([])
   status      GenerationStatus @default(queued)
   progress    Int              @default(0)
   outputId    String?          @unique
