@@ -106,50 +106,6 @@ export interface RetrieveOptions {
 }
 
 /**
- * Explicit selected-source chunk loading for Studio generation.
- * Unlike retrieveChunks (query-driven search), this loads chunks from the
- * validated source snapshot with no query — deterministic, bounded, and
- * restricted to ready, non-deleted sources of this notebook.
- */
-export async function getSourceChunks({
-  notebookId,
-  sourceIds,
-  limit = env.RETRIEVAL_TOP_K,
-}: {
-  notebookId: string
-  sourceIds: string[]
-  limit?: number
-}): Promise<RetrievedChunk[]> {
-  if (sourceIds.length === 0) return []
-  const rows = await prisma.sourceChunk.findMany({
-    where: {
-      sourceId: { in: sourceIds },
-      source: { notebookId, status: 'ready', deletedAt: null },
-    },
-    select: {
-      id: true,
-      sourceId: true,
-      text: true,
-      startOffset: true,
-      endOffset: true,
-      pageOffset: true,
-      source: { select: { title: true } },
-    },
-    orderBy: [{ sourceId: 'asc' }, { id: 'asc' }],
-    take: Math.max(1, Math.min(limit, 200)),
-  })
-  return rows.map((c) => ({
-    chunkId: c.id,
-    sourceId: c.sourceId,
-    sourceTitle: c.source.title,
-    text: c.text,
-    startOffset: c.startOffset,
-    endOffset: c.endOffset,
-    page: c.pageOffset,
-  }))
-}
-
-/**
  * Bounded retrieval with a short-TTL cache. FTS runs first; if it surfaces
  * fewer than 3 chunks the ILIKE fallback tops it up. Results are capped at
  * RETRIEVAL_TOP_K chunks regardless (spec §31).

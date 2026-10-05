@@ -134,6 +134,8 @@ export default function NotebookWorkspace() {
     pollTimersRef.current.push(window.setTimeout(poll, 5000));
   };
 
+  const selectedSourceCount = sources.filter((s) => s.selected).length;
+
   if (loading) {
     return (
       <div className="flex h-[100dvh] min-h-[540px] flex-col items-center justify-center bg-[#202226] text-[#eef0f4]">
@@ -234,6 +236,7 @@ export default function NotebookWorkspace() {
             onToggle={toggleStudio}
             onUsePrompt={(text) => setPromptSeed({ text, id: Date.now() })}
             onToast={showToast}
+            selectedSourceCount={selectedSourceCount}
           />
         </div>
         {!studioOpen && (

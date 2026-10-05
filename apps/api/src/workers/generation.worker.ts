@@ -5,9 +5,8 @@ import { bullmqConnection } from '../config/redis'
 import { QUEUES, GenerationJobData } from '../queues/jobTypes'
 import { invalidateSourceListCache, invalidateRetrievalCache } from '../cache/invalidation'
 import * as chatService from '../services/chat'
-import { getSourceChunks } from '../services/retrieval'
+import { retrieveChunks } from '../services/retrieval'
 import { generateText } from '../providers/gemini'
-import { resolveGenerationCitations, stripCodeFences } from '../utils/citations'
 import { logger } from '../utils/logger'
 import { AppError } from '../utils/errors'
 
@@ -125,19 +124,6 @@ const OUTPUT_SCHEMAS: Record<GenerationType, z.ZodTypeAny> = {
   mindmap: mindmapOutputSchema,
 }
 
-/**
- * Exact JSON shape per type, shown to the model. The prompt previously said
- * "matching the expected schema" without showing it, so the model invented
- * keys (quiz_questions/answer/reference) and validation always failed.
- */
-const OUTPUT_SHAPES: Record<GenerationType, string> = {
-  quiz: '{"questions":[{"question":"...","options":["...","...","...","..."],"correctIndex":0,"explanation":"...","citations":[1]}],"metadata":{"topic":"<topic>","difficulty":"<easy|medium|hard>"}}',
-  flashcards: '{"cards":[{"front":"...","back":"...","citations":[1]}]}',
-  summary: '{"summary":"...","keyPoints":["..."],"citations":[1]}',
-  report: '{"title":"...","sections":[{"heading":"...","content":"...","citations":[1]}]}',
-  mindmap: '{"root":{"id":"1","label":"...","children":[]}}',
-}
-
 // ─── Helpers ───
 
 function buildGenerationPrompt(jobType: GenerationType, context: chatService.PromptContext, config: any): string {
@@ -153,21 +139,18 @@ function buildGenerationPrompt(jobType: GenerationType, context: chatService.Pro
     blocks,
     '----------------',
     '',
-    'Expected JSON shape:',
-    OUTPUT_SHAPES[jobType],
-    '',
-    'Return ONLY valid JSON matching the expected schema. Do not wrap it in code fences.',
+    'Return ONLY valid JSON matching the expected schema.',
   ].join('\n')
 }
 
 function getConfigInstructions(jobType: GenerationType, config: any): string {
   switch (jobType) {
     case 'quiz':
-      return `Create exactly ${config.questionCount} questions at ${config.difficulty} difficulty.${config.topic ? ` Focus questions on: ${config.topic}.` : ''} Use only the selected sources.`
+      return `Create exactly ${config.questionCount} questions at ${config.difficulty} difficulty.`
     case 'flashcards':
       return `Create exactly ${config.count} flashcards.`
     case 'summary':
-      return `Write a ${config.length} summary. short=~150 words, medium=~300 words, long=~600 words.${config.topic ? ` Focus specifically on: ${config.topic}.` : ''}`
+      return `Write a ${config.length} summary. short=~150 words, medium=~300 words, long=~600 words.`
     case 'report':
       return `Write a ${config.length} report${config.focus ? ` focused on: ${config.focus}` : ''}.`
     case 'mindmap':
@@ -179,7 +162,7 @@ function getConfigInstructions(jobType: GenerationType, config: any): string {
 
 async function validateOutput(jobType: GenerationType, jsonText: string): Promise<any> {
   const schema = OUTPUT_SCHEMAS[jobType]
-  const parsed = JSON.parse(stripCodeFences(jsonText))
+  const parsed = JSON.parse(jsonText)
   return schema.parse(parsed)
 }
 
@@ -205,7 +188,7 @@ export async function processGenerationJob(job: Job<GenerationJobData>): Promise
 
   const dbJob = await prisma.generationJob.findUnique({
     where: { id: jobId },
-    select: { id: true, notebookId: true, type: true, config: true, sourceIds: true, status: true, requestedBy: true },
+    select: { id: true, notebookId: true, type: true, config: true, status: true, requestedBy: true },
   })
 
   if (!dbJob) return { status: 'not-found' }
@@ -225,21 +208,14 @@ export async function processGenerationJob(job: Job<GenerationJobData>): Promise
     return { status: 'stale' }
   }
 
-  let rawOutput = ''
   try {
     await setProgress(jobId, 20)
 
-    // Retrieve chunks from the persisted source snapshot — never live UI state,
-    // never an empty-query search.
-    const snapshotIds = (dbJob.sourceIds ?? []) as string[]
-    if (snapshotIds.length === 0) {
+    // Retrieve relevant chunks (spec §30/§31) — use all selected ready sources
+    const chunks = await retrieveChunks({ notebookId, query: '', sourceIds: null })
+    if (chunks.length === 0) {
       await markFailed(jobId, 'NO_SOURCES_SELECTED')
       throw new UnrecoverableError('NO_SOURCES_SELECTED')
-    }
-    const chunks = await getSourceChunks({ notebookId, sourceIds: snapshotIds })
-    if (chunks.length === 0) {
-      await markFailed(jobId, 'SOURCE_NOT_READY')
-      throw new UnrecoverableError('SOURCE_NOT_READY')
     }
 
     await setProgress(jobId, 40)
@@ -251,7 +227,7 @@ export async function processGenerationJob(job: Job<GenerationJobData>): Promise
     await setProgress(jobId, 60)
 
     // Call Gemini with structured output
-    rawOutput = await generateText({
+    const rawOutput = await generateText({
       prompt,
       systemInstruction,
       model: 'chat',
@@ -260,16 +236,10 @@ export async function processGenerationJob(job: Job<GenerationJobData>): Promise
 
     await setProgress(jobId, 80)
 
-    // Validate JSON output (spec §36), then resolve citation indexes to real
-    // chunk/source metadata. Invalid indexes are dropped, never fabricated.
+    // Validate JSON output (spec §36)
     const validated = await validateOutput(dbJob.type, rawOutput)
 
     await setProgress(jobId, 90)
-
-    const { cleaned, sources } = resolveGenerationCitations(validated, context.usedChunks)
-    const content = { ...cleaned, sources }
-
-    await setProgress(jobId, 95)
 
     // Persist Output + update Job atomically (spec §63)
     await prisma.$transaction(async (tx) => {
@@ -284,7 +254,7 @@ export async function processGenerationJob(job: Job<GenerationJobData>): Promise
           jobId,
           type: dbJob.type,
           title: getOutputTitle(dbJob.type, validated),
-          content: content as never,
+          content: validated as never,
         },
       })
 
@@ -303,17 +273,7 @@ export async function processGenerationJob(job: Job<GenerationJobData>): Promise
     invalidateRetrievalCache(notebookId)
 
     await setProgress(jobId, 100)
-    log.info(
-      {
-        jobId,
-        notebookId,
-        type: dbJob.type,
-        sourceCount: snapshotIds.length,
-        chunkCount: context.usedChunks.length,
-        citationCount: sources.length,
-      },
-      'generation_completed'
-    )
+    log.info({ jobId, notebookId, type: dbJob.type }, 'generation_completed')
     return { status: 'completed' }
   } catch (err) {
     const attempt = job.attemptsMade + 1
@@ -325,7 +285,7 @@ export async function processGenerationJob(job: Job<GenerationJobData>): Promise
     }
     if (err instanceof z.ZodError) {
       await markFailed(jobId, 'INVALID_AI_OUTPUT')
-      log.warn({ jobId, err: err.errors, raw: rawOutput.slice(0, 500) }, 'AI output validation failed')
+      log.warn({ jobId, err: err.errors }, 'AI output validation failed')
       throw new UnrecoverableError('INVALID_AI_OUTPUT')
     }
     if (err instanceof AppError && !err.retryable) {

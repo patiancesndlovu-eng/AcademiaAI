@@ -5,10 +5,9 @@ import { requireNotebookRole } from '../middleware/authorization'
 import { validateBody, validateParams } from '../middleware/validateRequest'
 import { success } from '../utils/response'
 import { prisma } from '../config/db'
-import { conflict, notFound, validationError } from '../utils/errors'
+import { conflict, notFound } from '../utils/errors'
 import { enqueueGeneration } from '../queues/queues'
 import { generationConfigSchema } from '../schemas/generation'
-import { validateSourceSelection } from '../services/chat'
 
 const router = Router({ mergeParams: true })
 
@@ -25,13 +24,7 @@ router.post(
   validateBody(generationConfigSchema),
   async (req, res, next) => {
     try {
-      const { type, sourceIds, config } = req.body
-
-      // Backend is authority on selection: every ID must be a ready source of this notebook.
-      const { validIds, invalidIds } = await validateSourceSelection(req.notebook!.id, sourceIds)
-      if (invalidIds.length > 0 || validIds.length === 0) {
-        throw validationError('One or more selected sources are unavailable.')
-      }
+      const { type, config } = req.body
 
       const job = await prisma.generationJob.create({
         data: {
@@ -39,7 +32,6 @@ router.post(
           requestedBy: req.user!.id,
           type,
           config: config as never,
-          sourceIds: validIds,
         },
       })
 

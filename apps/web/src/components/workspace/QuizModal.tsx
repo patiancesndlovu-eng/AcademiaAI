@@ -2,7 +2,7 @@ import { useRef, useState, useEffect } from "react";
 import { Check, ChevronDown, Sparkles, Loader2, FileText, AlertCircle } from "lucide-react";
 import { ModalShell } from "./ModalShell";
 import { Popover } from "@/components/common/Popover";
-import { createGeneration, getGeneration, buildGenerationRequest, generationErrorMessage, type GenerationJob } from "@/lib/api";
+import { createGeneration, getGeneration, type GenerationJob } from "@/lib/api";
 
 function Segment({ label, options, value, onChange }: { label: string; options: string[]; value: string; onChange: (value: string) => void }) {
   return (
@@ -51,11 +51,14 @@ export function QuizModal({ notebookId, selectedSources, onClose, onGenerated }:
     setError(null);
 
     try {
-      const res = await createGeneration(notebookId, buildGenerationRequest('quiz', selectedSources.map((s) => s.id), {
-        questionCount: countMap[count as keyof typeof countMap],
-        difficulty: difficultyMap[difficulty as keyof typeof difficultyMap],
-        topic: topic.trim() || undefined,
-      }));
+      const res = await createGeneration(notebookId, {
+        type: 'quiz',
+        config: {
+          questionCount: countMap[count as keyof typeof countMap],
+          difficulty: difficultyMap[difficulty as keyof typeof difficultyMap],
+          topic: topic.trim() || undefined,
+        },
+      });
 
       setGenerating(false);
       setPolling(true);
@@ -92,7 +95,7 @@ export function QuizModal({ notebookId, selectedSources, onClose, onGenerated }:
           clearInterval(interval);
           pollRef.current = null;
           setPolling(false);
-          setError(generationErrorMessage(job.error));
+          setError(job.error || `Generation ${job.status}`);
         }
       } catch (e) {
         console.error('Polling error:', e);
